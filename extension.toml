@@ -1,0 +1,10 @@
+id = "comment-translate"
+name = "Ukrainian Comment Translation"
+version = "0.1.0"
+schema_version = 1
+authors = ["Comment Translate contributors"]
+description = "Translate C comments into Ukrainian in the hover popup."
+
+[language_servers.comment-translate]
+name = "Comment Translate"
+languages = ["C"]

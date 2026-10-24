@@ -1,0 +1,21 @@
+name: Linux
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-wasip2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace -- --include-ignored
+      - run: cargo test -p comment-translate-lsp --no-default-features -- --include-ignored
+      - run: ./scripts/build.sh
+      - run: python3 scripts/smoke_test.py target/release/comment-translate-lsp google
+      - run: python3 scripts/test_apple_translate.py target/release/comment-translate-lsp

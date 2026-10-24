@@ -1,0 +1,7 @@
+/target/
+/.cargo-home/
+*.wasm
+.DS_Store
+
+__pycache__/
+*.pyc

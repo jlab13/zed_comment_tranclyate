@@ -1,0 +1,30 @@
+{
+  "file_types": {
+    "C": [
+      "c",
+      "h"
+    ]
+  },
+  "languages": {
+    "C": {
+      "language_servers": [
+        "clangd",
+        "comment-translate",
+        "..."
+      ]
+    }
+  },
+  "lsp": {
+    "comment-translate": {
+      "binary": {
+        "path": "/Users/jlab13/src/rust/zed_comment_tranclyate/target/release/comment-translate-lsp"
+      },
+      "initialization_options": {
+        "provider": "google",
+        "source_language": "auto",
+        "timeout_seconds": 60,
+        "max_comment_chars": 4000
+      }
+    }
+  }
+}

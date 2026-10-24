@@ -1,0 +1,8 @@
+[
+  {
+    "context": "Editor",
+    "bindings": {
+      "ctrl-alt-t": "editor::Hover"
+    }
+  }
+]
