@@ -2,8 +2,6 @@ use crate::deepl;
 use crate::google;
 use crate::locale::{self, TargetLanguage};
 use crate::mymemory;
-#[cfg(all(target_os = "macos", feature = "apple"))]
-use crate::native;
 use crate::segments::{self, Segment};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -17,7 +15,6 @@ use tokio::{sync::Mutex, time::timeout};
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
-    Apple,
     #[default]
     Google,
     MyMemory,
@@ -27,7 +24,6 @@ pub enum Provider {
 impl Provider {
     pub fn name(self) -> &'static str {
         match self {
-            Self::Apple => "Apple Translation",
             Self::Google => "Google Translate",
             Self::MyMemory => "MyMemory",
             Self::DeepL => "DeepL",
@@ -36,7 +32,6 @@ impl Provider {
 
     fn id(self) -> &'static str {
         match self {
-            Self::Apple => "apple",
             Self::Google => "google",
             Self::MyMemory => "mymemory",
             Self::DeepL => "deepl",
@@ -48,7 +43,7 @@ impl Provider {
         match self {
             Self::DeepL => vec![Self::Google, Self::MyMemory],
             Self::Google => vec![Self::MyMemory],
-            Self::MyMemory | Self::Apple => Vec::new(),
+            Self::MyMemory => Vec::new(),
         }
     }
 }
@@ -61,7 +56,7 @@ pub struct Config {
     /// Мова перекладу; відсутнє поле або `auto` означає мову системної локалі.
     pub target_language: Option<String>,
     /// Запасні рушії по черзі: `"none"`, назва провайдера або список. Без поля
-    /// DeepL переходить на Google і MyMemory, Google — на MyMemory. Apple ніколи не перемикається.
+    /// DeepL переходить на Google і MyMemory, Google — на MyMemory.
     #[serde(deserialize_with = "deserialize_fallback")]
     pub fallback: Option<Vec<Provider>>,
     /// Адреса для MyMemory: піднімає анонімний денний ліміт.
@@ -115,27 +110,15 @@ const MISSING_DEEPL_KEY: &str =
 
 impl Config {
     pub fn validate(&self) -> Result<(), String> {
-        #[cfg(not(all(target_os = "macos", feature = "apple")))]
-        if self.provider == Provider::Apple {
-            return Err(apple_unavailable());
-        }
         if self.source_language.trim().is_empty() {
             return Err("source_language має бути auto або кодом мови, наприклад en".into());
         }
         explicit_target(self.target_language.as_deref())?;
         if let Some(fallback) = &self.fallback {
-            if self.provider == Provider::Apple && !fallback.is_empty() {
-                return Err(
-                    "Apple ніколи не перемикається на онлайн-сервіси: приберіть fallback".into(),
-                );
-            }
             for (index, provider) in fallback.iter().enumerate() {
-                if *provider == Provider::Apple
-                    || *provider == self.provider
-                    || fallback[..index].contains(provider)
-                {
+                if *provider == self.provider || fallback[..index].contains(provider) {
                     return Err(format!(
-                        "fallback не може містити apple, сам провайдер ({}) чи повтори",
+                        "fallback не може містити сам провайдер ({}) чи повтори",
                         self.provider.id()
                     ));
                 }
@@ -214,13 +197,6 @@ fn explicit_target(value: Option<&str>) -> Result<Option<String>, String> {
     }
 }
 
-#[cfg(all(target_os = "macos", feature = "apple"))]
-#[derive(Deserialize)]
-struct Response {
-    translation: Option<String>,
-    error: Option<String>,
-}
-
 #[tower_lsp::async_trait]
 trait Engine: Send + Sync {
     async fn translate(&self, text: &str, config: &Config, target: &str) -> Result<String, String>;
@@ -280,35 +256,7 @@ impl ProviderEngine {
                 Ok(key) => deepl::translate(text, source, target, key, deadline).await,
                 Err(reason) => Err(reason.clone()),
             },
-            Provider::Apple => apple(text, config, target, deadline).await,
         }
-    }
-}
-
-async fn apple(
-    text: &str,
-    config: &Config,
-    target: &str,
-    deadline: Duration,
-) -> Result<String, String> {
-    #[cfg(all(target_os = "macos", feature = "apple"))]
-    {
-        let payload = json!({"provider":"apple", "text":text, "source_language":config.source_language, "target_language":target}).to_string();
-        let response = native::request(payload, deadline).await?;
-        let response: Response = serde_json::from_str(&response)
-            .map_err(|_| "Некоректна відповідь бібліотеки Apple Translation")?;
-        if let Some(error) = response.error {
-            return Err(error);
-        }
-        response
-            .translation
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| "Apple Translation повернув порожній переклад".into())
-    }
-    #[cfg(not(all(target_os = "macos", feature = "apple")))]
-    {
-        let _ = (text, config, target, deadline);
-        Err(apple_unavailable())
     }
 }
 
@@ -318,7 +266,6 @@ fn throttled(provider: Provider, error: &str) -> bool {
         Provider::Google => google::throttled(error),
         Provider::MyMemory => mymemory::throttled(error),
         Provider::DeepL => deepl::throttled(error),
-        Provider::Apple => false,
     }
 }
 
@@ -454,12 +401,6 @@ fn same_language(source: &str, target: &str) -> bool {
         .is_some_and(|source| Some(source) == locale::language_from_locale(target))
 }
 
-#[cfg(not(all(target_os = "macos", feature = "apple")))]
-fn apple_unavailable() -> String {
-    "Apple Translation доступний лише на macOS зі збіркою apple. Встановіть provider: google."
-        .into()
-}
-
 #[derive(Deserialize)]
 struct DiagnosticRequest {
     provider: Option<Provider>,
@@ -482,25 +423,6 @@ pub async fn diagnose(input: &str) -> Result<serde_json::Value, String> {
     }
     let target = explicit_target(request.target_language.as_deref())?
         .unwrap_or_else(|| locale::system_language().code);
-    if provider == Provider::Apple {
-        #[cfg(all(target_os = "macos", feature = "apple"))]
-        {
-            // Swift отримує вже визначену мову, щоб CLI і LSP поводилися однаково.
-            let mut payload: serde_json::Value = serde_json::from_str(input).map_err(|_| {
-                "Некоректний запит JSON: перевірте text, provider та timeout_seconds"
-            })?;
-            with_target(&mut payload, &target);
-            let reply = native::request(payload.to_string(), Duration::from_secs(seconds)).await?;
-            let mut reply: serde_json::Value = serde_json::from_str(&reply)
-                .map_err(|_| "Некоректний JSON від Apple Translation")?;
-            with_target(&mut reply, &target);
-            return Ok(reply);
-        }
-        #[cfg(not(all(target_os = "macos", feature = "apple")))]
-        {
-            return Err(apple_unavailable());
-        }
-    }
     validate_email(request.mymemory_email.as_deref())?;
     let id = provider.id();
     let deadline = Duration::from_secs(seconds);
@@ -567,13 +489,6 @@ pub async fn diagnose(input: &str) -> Result<serde_json::Value, String> {
     Ok(
         json!({"provider":id, "translation":translation, "source_language":source, "target_language":target}),
     )
-}
-
-#[cfg(all(target_os = "macos", feature = "apple"))]
-fn with_target(value: &mut serde_json::Value, target: &str) {
-    if let Some(object) = value.as_object_mut() {
-        object.insert("target_language".into(), target.into());
-    }
 }
 
 #[cfg(test)]
@@ -730,22 +645,8 @@ mod tests {
             .contains("Час очікування"));
         assert_eq!(engine.calls.load(Ordering::Relaxed), 1);
     }
-    #[cfg(not(all(target_os = "macos", feature = "apple")))]
     #[tokio::test]
-    async fn apple_selection_fails_clearly_without_native_support() {
-        let config = Config {
-            provider: Provider::Apple,
-            ..Config::default()
-        };
-        assert!(config.validate().unwrap_err().contains("macOS"));
-        assert!(diagnose(r#"{"provider":"apple","text":"Hello"}"#)
-            .await
-            .unwrap_err()
-            .contains("provider: google"));
-    }
-
-    #[tokio::test]
-    async fn google_diagnostics_do_not_need_apple_models() {
+    async fn google_diagnostics_return_same_language_text_without_network() {
         let value = diagnose(
             r#"{"provider":"google","text":"Текст 😀","source_language":"uk","target_language":"uk"}"#,
         )
@@ -928,11 +829,11 @@ mod tests {
     }
 
     #[test]
-    fn rejects_fallback_to_itself_apple_or_repeats() {
+    fn rejects_fallback_to_itself_or_repeats() {
         for json in [
             r#"{"fallback":"google"}"#,
             r#"{"fallback":["mymemory","mymemory"]}"#,
-            r#"{"provider":"deepl","fallback":["apple"]}"#,
+            r#"{"provider":"deepl","fallback":["deepl"]}"#,
         ] {
             let config: Config = serde_json::from_str(json).unwrap();
             assert!(

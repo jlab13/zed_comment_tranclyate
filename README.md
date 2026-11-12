@@ -6,7 +6,6 @@ An extension for **macOS and Linux** that shows a translation of the comment und
 in Zed's standard hover popup, in the system language (or the language set in `target_language`).
 The default provider on both macOS and Linux is **Google Translate**, which needs no API key;
 when Google does not answer, it falls back to **MyMemory**. **DeepL** works on your own API key.
-**Apple Translation** is available on macOS 26+ through configuration.
 Supports **C, C++, Rust, Python, Shell Script (Bash), Swift, and Dart**: line, block,
 and documentation comments, plus Python docstrings. Tree-sitter tells strings, raw strings,
 interpolation, and heredocs apart from comments. The code in the file is never modified.
@@ -26,7 +25,6 @@ interpolation, and heredocs apart from comments. The code in the file is never m
 Zed → WASM extension → Rust LSP → Google Translate (Rust, all platforms)
                              ↳ MyMemory (Rust, fallback for Google)
                              → DeepL (Rust, own API key; falls back to Google and MyMemory)
-                             → Apple Translation (Swift, macOS only)
 ```
 
 - `src/lib.rs` — the Zed extension that launches the server.
@@ -37,23 +35,16 @@ Zed → WASM extension → Rust LSP → Google Translate (Rust, all platforms)
 - `server/src/google.rs` — the shared Google HTTP client built on reqwest/rustls.
 - `server/src/mymemory.rs` — the MyMemory client: request chunking, quota and error handling.
 - `server/src/deepl.rs` — the DeepL client: key loading, endpoint by plan, language variants, usage.
-- `native/` — the Swift Apple translator, strategy selection, and the C-compatible bridge.
-- `server/build.rs` — links Swift only on macOS with the `apple` feature.
 - `examples/` — Zed settings, a key binding, and demo files with English comments for every supported language.
 - `scripts/` — build and test scripts.
 
-For Apple, the LSP calls the Swift library in the same process through the C ABI. The response
-arrives through an asynchronous callback. Swift copies the input string and Rust copies the
-response before the callback returns, so memory ownership never crosses the language boundary.
-In the Apple build the main thread services the macOS queue, while Tokio/LSP runs on another
-thread of the same process. On Linux, Tokio/LSP runs directly without Swift or Apple frameworks.
-The target language comes from the system locale or from `target_language` (see
+The server is plain Rust with no platform-specific code beyond reading the macOS language list,
+and it is built the same way on macOS and Linux. The target language comes from the system locale or from `target_language` (see
 [Translation language](#translation-language)). The source language is set with `source_language`;
-`auto` uses NaturalLanguage for Apple and Google's language detection for Google.
+`auto` lets the translation service detect the language.
 If the source language matches the target language, the text is returned unchanged.
-On macOS 26.4+, Apple checks `highFidelity` first and then `lowLatency`; translation runs
-locally. Google uses the portable Rust reqwest HTTP client with rustls TLS and needs internet access.
-Apple never switches to another provider. DeepL falls back to Google and MyMemory, and Google to
+Every provider uses the Rust reqwest HTTP client with rustls TLS and needs internet access.
+DeepL falls back to Google and MyMemory, and Google to
 MyMemory, unless `fallback` says otherwise (see [Fallback order](#fallback-order)).
 Up to 256 successful results are cached in memory; when the cache is full, it is cleared.
 
@@ -61,34 +52,21 @@ Up to 256 successful results are cached in memory; when the cache is full, it is
 
 Both platforms need Rust via rustup, a C compiler for Tree-sitter, and access to crates.io
 for the first dependency download. On Debian/Ubuntu, install a C compiler with
-`sudo apt install build-essential`. Google does not need OpenSSL.
-
-On macOS, the Apple build additionally requires macOS 26+ and Xcode with the macOS 26.4+ SDK.
-Linux does not use Swift, Xcode, or the Apple SDK.
+`sudo apt install build-essential`; on macOS, the Xcode Command Line Tools. OpenSSL is not needed.
 
 ```sh
 rustup target add wasm32-wasip2
 ./scripts/build.sh
 ```
 
-The script builds `target/release/comment-translate-lsp` and the WASM extension. On macOS, Cargo
-embeds the Swift library automatically; on Linux, `build.rs` skips that step.
-`cfg(all(target_os = "macos", feature = "apple"))` isolates every Apple call.
-
-To build without Apple, even on macOS:
-
-```sh
-cargo build --release -p comment-translate-lsp --no-default-features
-```
-
-In this mode the default provider is Google, `xcrun` is never invoked, and selecting `apple`
-returns a clear error. On Linux, the `apple` feature adds no Apple code even though it is
-enabled by default. Do not build the whole workspace for WASM: the LSP is a native process.
-If you previously set `initialization_options.helper_path`, remove it.
+The script builds `target/release/comment-translate-lsp` and the WASM extension. Do not build the
+whole workspace for WASM: the LSP is a native process. If you previously set
+`initialization_options.helper_path` or `"provider": "apple"`, remove them: the Apple Translation
+backend has been removed.
 
 ## Choosing a provider
 
-Without a `provider` field, **Google is used on all platforms**. For Google, add to your Zed settings:
+Without a `provider` field, **Google** is used. For Google, add to your Zed settings:
 
 ```json
 {
@@ -105,15 +83,14 @@ Without a `provider` field, **Google is used on all platforms**. For Google, add
 }
 ```
 
-To switch back to Apple on macOS, set `"provider": "apple"`.
+The other providers are `"mymemory"` and `"deepl"` (see [MyMemory](#mymemory) and [DeepL](#deepl)).
 The `target_language` field is described in [Translation language](#translation-language).
-On Linux, an explicit `apple` selection is rejected without contacting Google.
 Keep your existing `binary` field and other settings. After switching, restart the language
 servers or Zed. Examples: [`zed-settings.json`](examples/zed-settings.json)
 and [`zed-settings-google.json`](examples/zed-settings-google.json). For Linux there is
 [`zed-settings-linux.json`](examples/zed-settings-linux.json): replace the server path.
 
-Google works without API keys or Apple language packs, but it needs internet access and sends
+Google works without API keys, but it needs internet access and sends
 the comment text to Google. It uses the web endpoint
 `https://translate.googleapis.com/translate_a/single` with `client=gtx`, not the paid Cloud
 Translation API. This web interface may change or rate-limit requests.
@@ -139,7 +116,7 @@ be reached, rate-limits requests, or returns an error, the same paragraph goes t
 the reason is written to the language server log. After HTTP 429 or 403 from Google, the server
 skips Google for 5 minutes and sends requests straight to MyMemory instead of hitting a service
 that is already refusing them. Each service in the chain gets an equal share of
-`timeout_seconds`. If every service fails, the hover shows all reasons. Apple never falls back.
+`timeout_seconds`. If every service fails, the hover shows all reasons.
 
 ```json
 {
@@ -218,8 +195,8 @@ echo '{"provider":"deepl","operation":"check","deepl_key_file":"~/.local/state/o
 
 `fallback` sets the services tried after the provider, in order: `"none"`, one provider name, or a
 list such as `["google", "mymemory"]`. Without the field, DeepL falls back to Google and MyMemory,
-Google to MyMemory, and MyMemory to nothing. Apple never falls back, and the list cannot contain
-`apple`, the provider itself, or repeats. The order is written to the language server log at startup.
+Google to MyMemory, and MyMemory to nothing. The list cannot contain the provider itself or
+repeats. The order is written to the language server log at startup.
 For example, `"provider": "deepl", "fallback": ["mymemory"]` never sends comments to Google.
 
 ## Translation language
@@ -253,36 +230,6 @@ script: `zh_TW` → `zh-Hant`, `zh_CN` → `zh-Hans`. The selected language and 
 written to the language server log (in Zed's command palette: `open language server logs`).
 After changing `target_language` or the system language, restart the language servers or Zed.
 The hover header shows the language code: `Переклад → uk`. Error messages stay in Ukrainian.
-
-## Apple translation models (macOS only)
-
-On macOS 26.4+, check that Apple Intelligence is enabled and its models are downloaded:
-`highFidelity` can work without separate language packs. Apple may fall back to traditional
-models; the strategy name does not guarantee a specific model. If no strategy is ready,
-download the source and target languages in **System Settings → General → Language & Region →
-Translation Languages**. Availability is checked for the specific language pair.
-macOS 26.0–26.3 uses regular language packs.
-Checking English → Ukrainian:
-
-```sh
-echo '{"provider":"apple","operation":"check","source_language":"en","target_language":"uk"}' \
-  | ./target/release/comment-translate-lsp --translate
-```
-
-A `"status":"installed"` response means it is ready. The `strategy` field shows the selected
-strategy (`highFidelity` or `lowLatency`), and `checked_strategies` shows the results of the
-checks that ran. A ready `highFidelity` is used right away without checking `lowLatency`.
-`supported` means the required models are not ready yet; `unsupported` means the pair is not supported.
-The check is limited to 15 seconds.
-The LSP never shows download dialogs. If packs are missing, the hover explains
-what to do. Packs are downloaded through the system interface.
-
-Checking a translation through the embedded library:
-
-```sh
-echo '{"provider":"apple","text":"Return the next counter value.","source_language":"en"}' \
-  | ./target/release/comment-translate-lsp --translate
-```
 
 ## Connecting to Zed
 
@@ -318,27 +265,25 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo build -p comment-translate-lsp
 python3 scripts/smoke_test.py
-./scripts/test_native.sh
+python3 scripts/test_cli.py target/release/comment-translate-lsp
 ```
 
-The smoke test uses the real LSP and the static Swift bridge with Ukrainian text,
-which needs no language models. It covers `.c`, `.h` in C and C++ modes, Rust, Python,
+The smoke test uses the real LSP with the same source and target language, so it needs no
+network. It covers `.c`, `.h` in C and C++ modes, Rust, Python,
 Shell Script, ignoring unsupported languages, hover, editing, closing,
 limits, and process shutdown. Per-language Rust tests cover comment node kinds,
 markers inside strings, line grouping, docstrings, shebangs, and UTF-16 positions. Separate Rust
-tests cover caching, errors, timeouts, Unicode transfer, and safely ignoring a late callback
-after cancellation. `test_native.sh` checks Swift and the CLI only for the Apple build on macOS.
-Shared Rust tests cover Google: parameter encoding, JSON, and HTTP errors. Two loopback HTTP
+tests cover caching, errors, timeouts, the fallback chain, and code protection. `test_cli.py`
+checks `--check` and `--translate` without network. Rust tests cover Google, MyMemory, and DeepL: parameter encoding, JSON, and HTTP errors. Two loopback HTTP
 tests are marked `ignored` because they need permission to open local TCP sockets:
 
 ```sh
 cargo test -p comment-translate-lsp -- --include-ignored
-cargo test -p comment-translate-lsp --no-default-features
 ```
 
 Linux CI runs these checks, builds the server and WASM, and checks the CLI and LSP.
-Regular tests need neither internet access nor language models. Real translation needs
-ready Apple models or access to Google.
+Regular tests need no internet access. Real translation needs access to Google, MyMemory, or
+DeepL.
 
 ## Code protection
 
@@ -365,8 +310,8 @@ are shown as plain text, so `*` and `_` in them are never turned into formatting
 
 ## Limitations
 
-C, C++, Rust, Python, Shell Script, Swift, and Dart are supported on macOS and Linux;
-Apple translation requires macOS 26+. Other languages are ignored: no hover appears for them.
+C, C++, Rust, Python, Shell Script, Swift, and Dart are supported on macOS and Linux.
+Other languages are ignored: no hover appears for them.
 The language is determined by the `languageId` from Zed, or by the file extension if the ID is unknown.
 Adjacent line comments (`//`, `///`, `//!`, or `#`) with no code before the marker are
 translated as one block. A blank line, code, or a block comment separates blocks.
@@ -382,14 +327,9 @@ of a module, class, or function without an `f`/`b`/`t` prefix; quotes and `r`/`u
 removed, and indentation is normalized as in `inspect.cleandoc`. Other strings, f-strings,
 heredocs, and shebangs are not translated. All of this happens before the text is passed to the
 selected translator. One translation request runs at a time; requests and queue waits are
-limited by `timeout_seconds`. On timeout, the Google request is cancelled in Rust; for Apple,
-Rust detaches the callback and cancels the Swift task and the active session. System calls may
-not respond to cancellation immediately, so the Apple bridge holds at most 8 unfinished tasks
-and rejects new ones until a slot frees up. A failure in the native library now affects the LSP
-process, because the translator runs inside it.
+limited by `timeout_seconds`; on timeout, the request in flight is cancelled.
 There is no dedicated translation command: Zed's standard hover is used, so translation can
 also be triggered by hovering the mouse. Native programs are not installed automatically.
 
 Documentation: [Zed extensions](https://zed.dev/docs/extensions/developing-extensions),
-[Apple Translation](https://developer.apple.com/documentation/translation),
-[session for installed languages](https://developer.apple.com/documentation/translation/translationsession/init(installedsource:target:)).
+[DeepL API](https://developers.deepl.com/docs), [MyMemory API](https://mymemory.translated.net/doc/spec.php).

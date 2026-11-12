@@ -1,4 +1,4 @@
-"""Перевірка справжнього LSP зі статично вбудованою Swift-бібліотекою."""
+"""Перевірка справжнього LSP без мережі: вихідна й цільова мова збігаються."""
 
 import json
 import os
@@ -31,8 +31,8 @@ def main():
     if not binary.is_file():
         raise SystemExit("Спочатку виконайте cargo build -p comment-translate-lsp")
     provider = sys.argv[2] if len(sys.argv) > 2 else "google"
-    if provider not in ("apple", "google"):
-        raise SystemExit("Провайдер має бути apple або google")
+    if provider not in ("google", "mymemory", "deepl"):
+        raise SystemExit("Провайдер має бути google, mymemory або deepl")
     process = subprocess.Popen([str(binary)], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
     messages = queue.Queue()
     threading.Thread(target=read_messages, args=(process.stdout, messages), daemon=True).start()
@@ -206,7 +206,7 @@ def main():
         send("exit")
         assert process.wait(timeout=5) == 0
         print(f"LSP smoke test ({provider}): OK — C, .h (C і C++), Rust, Python, Shell Script, "
-              "hover, кеш, зміни, закриття, вбудований Swift та ліміти")
+              "hover, кеш, зміни, закриття та ліміти")
     finally:
         if process.poll() is None:
             process.kill()

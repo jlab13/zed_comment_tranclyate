@@ -1,7 +1,6 @@
-"""Перевірки вбудованої Swift-бібліотеки через CLI LSP без системних моделей."""
+"""Перевірки CLI сервера (--check, --translate) без мережі."""
 
 import json
-import os
 import subprocess
 import sys
 import unittest
@@ -9,10 +8,8 @@ from pathlib import Path
 
 BINARY = Path(sys.argv.pop(1) if len(sys.argv) > 1 else "target/release/comment-translate-lsp").resolve()
 
-APPLE_AVAILABLE = sys.platform == "darwin" and os.environ.get("COMMENT_TRANSLATE_APPLE_AVAILABLE", "1") != "0"
 
-
-class AppleTranslateTests(unittest.TestCase):
+class CliTests(unittest.TestCase):
     def invoke(self, payload, arguments=()):
         result = subprocess.run([str(BINARY), *(arguments or ("--translate",))], input=payload,
                                 text=True, capture_output=True, timeout=5)
@@ -72,7 +69,7 @@ class AppleTranslateTests(unittest.TestCase):
         self.assertNotEqual(status, 0)
         self.assertIn("deepl_key_file", body["error"])
 
-    def test_google_can_be_selected_without_apple_models(self):
+    def test_google_check_needs_no_network(self):
         status, body = self.invoke(json.dumps({"provider": "google", "operation": "check"}))
         self.assertEqual(status, 0)
         self.assertEqual(body["provider"], "google")
@@ -95,11 +92,10 @@ class AppleTranslateTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(body["provider"], "google")
 
-    @unittest.skipIf(APPLE_AVAILABLE, "Потребує збірки без Apple")
-    def test_apple_is_rejected_without_native_support(self):
+    def test_removed_apple_provider_is_rejected(self):
         status, body = self.invoke(json.dumps({"provider": "apple", "text": "Hello"}))
         self.assertNotEqual(status, 0)
-        self.assertIn("macOS", body["error"])
+        self.assertIn("provider", body["error"])
 
 
 if __name__ == "__main__":

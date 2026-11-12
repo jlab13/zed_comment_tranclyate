@@ -4,8 +4,6 @@ mod google;
 mod languages;
 mod locale;
 mod mymemory;
-#[cfg(all(target_os = "macos", feature = "apple"))]
-mod native;
 mod segments;
 mod text;
 mod translate;
@@ -197,21 +195,7 @@ impl<S: Service<jsonrpc::Request>> Service<jsonrpc::Request> for ExitAware<S> {
     }
 }
 
-#[cfg(all(target_os = "macos", feature = "apple"))]
 fn main() {
-    std::thread::Builder::new()
-        .name("comment-translate-lsp".into())
-        .spawn(run_server)
-        .expect("Не вдалося запустити потік LSP");
-    native::run_main_loop();
-}
-
-#[cfg(not(all(target_os = "macos", feature = "apple")))]
-fn main() {
-    run_server();
-}
-
-fn run_server() {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
