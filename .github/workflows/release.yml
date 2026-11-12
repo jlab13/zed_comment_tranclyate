@@ -1,0 +1,96 @@
+name: Release
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  # Розширення завантажує сервер із релізу v{версія}, тому тег має збігатися з усіма версіями.
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check that the tag matches the manifest versions
+        run: |
+          status=0
+          for manifest in extension.toml Cargo.toml server/Cargo.toml; do
+            version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$manifest" | head -n 1)
+            if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+              echo "::error file=$manifest::version '$version' does not match tag '$GITHUB_REF_NAME'"
+              status=1
+            fi
+          done
+          exit "$status"
+
+  build:
+    needs: version
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+    runs-on: ${{ matrix.runner }}
+    env:
+      TARGET: ${{ matrix.target }}
+      # Без символів налагодження архів менший.
+      CARGO_PROFILE_RELEASE_STRIP: symbols
+      # cc-rs шукає aarch64-linux-musl-gcc, а musl-tools встановлює лише musl-gcc.
+      CC_x86_64_unknown_linux_musl: musl-gcc
+      CC_aarch64_unknown_linux_musl: musl-gcc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install musl tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes musl-tools
+      - name: Build
+        run: cargo build --release --locked -p comment-translate-lsp --target "$TARGET"
+      - name: Package
+        env:
+          # Не дає tar у macOS додати до архіву файли AppleDouble (._*).
+          COPYFILE_DISABLE: "1"
+        run: |
+          asset="comment-translate-lsp-$TARGET.tar.gz"
+          mkdir -p dist
+          tar -czf "dist/$asset" -C "target/$TARGET/release" comment-translate-lsp
+          (cd dist && shasum -a 256 "$asset" > "$asset.sha256")
+          tar -tzvf "dist/$asset"
+          cat "dist/$asset.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: comment-translate-lsp-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: comment-translate-lsp-*
+          path: dist
+          merge-multiple: true
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -l dist
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag

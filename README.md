@@ -85,10 +85,9 @@ Without a `provider` field, **Google** is used. For Google, add to your Zed sett
 
 The other providers are `"mymemory"` and `"deepl"` (see [MyMemory](#mymemory) and [DeepL](#deepl)).
 The `target_language` field is described in [Translation language](#translation-language).
-Keep your existing `binary` field and other settings. After switching, restart the language
-servers or Zed. Examples: [`zed-settings.json`](examples/zed-settings.json)
-and [`zed-settings-google.json`](examples/zed-settings-google.json). For Linux there is
-[`zed-settings-linux.json`](examples/zed-settings-linux.json): replace the server path.
+Keep your other settings. After switching, restart the language servers or Zed. Examples:
+[`zed-settings.json`](examples/zed-settings.json) (Google) and
+[`zed-settings-deepl.json`](examples/zed-settings-deepl.json) (DeepL with a key file).
 
 Google works without API keys, but it needs internet access and sends
 the comment text to Google. It uses the web endpoint
@@ -235,12 +234,42 @@ target language is Ukrainian (`Переклад → uk`).
 
 ## Connecting to Zed
 
+The extension does not bundle the language server. It starts the first one it finds:
+
+1. the path in `lsp.comment-translate.binary.path` in your Zed settings;
+2. `comment-translate-lsp` on your `PATH`;
+3. otherwise, the server downloaded automatically from the GitHub release whose tag matches
+   the extension version (extension 0.1.0 uses release `v0.1.0`, so the two always match).
+   Prebuilt servers exist for macOS (Apple Silicon and Intel) and Linux (x86_64 and aarch64,
+   a static musl build that runs on any distribution). Zed shows the download progress; the
+   archive is unpacked into the extension's own working directory, and older versions are
+   removed after an update.
+
+On other platforms (Windows, 32-bit x86), or to run your own build, set an absolute path
+(a relative one is resolved against the extension's working directory, not the project):
+
+```json
+{
+  "lsp": {
+    "comment-translate": {
+      "binary": {
+        "path": "/absolute/path/to/comment-translate-lsp"
+      }
+    }
+  }
+}
+```
+
+To try the extension from source:
+
 1. Run `./scripts/build.sh`.
 2. In the Zed command palette, run `zed: install dev extension` and select the project root.
-3. Add the fields you need from [`examples/zed-settings.json`](examples/zed-settings.json)
-   to your personal Zed settings. Check the absolute path to the LSP.
-4. After changing `initialization_options`, restart the language servers or Zed.
-5. Open a file in a supported language, hover over a comment or place the cursor inside
+3. Set `binary.path` to the absolute path of `target/release/comment-translate-lsp`, or put the
+   binary on your `PATH`; otherwise the extension downloads the released server for its version.
+4. Add the `initialization_options` fields you need from
+   [`examples/zed-settings.json`](examples/zed-settings.json) to your personal Zed settings.
+5. After changing `binary` or `initialization_options`, restart the language servers or Zed.
+6. Open a file in a supported language, hover over a comment or place the cursor inside
    a comment and run `editor: hover`. An example `ctrl-alt-t` key binding is in
    [`examples/keymap.json`](examples/keymap.json).
 
@@ -252,6 +281,29 @@ Swift and Dart appear in Zed only after installing the Swift and Dart extensions
 The translator is never called outside comments.
 For English-language code you can set `"source_language": "en"`: language detection for
 very short comments can be inaccurate. The default is `auto`.
+
+### Releases
+
+The extension downloads only the server release with its own version, so the version must be
+the same in `extension.toml`, `Cargo.toml` (`comment-translate`), and `server/Cargo.toml`
+(`comment-translate-lsp`); `cargo test` checks this.
+
+1. Bump `version` in all three files, run `cargo check --workspace` so `Cargo.lock` picks up the
+   new version, and commit the four files.
+2. Tag the commit and push the tag:
+
+   ```sh
+   git tag v0.2.0
+   git push origin v0.2.0
+   ```
+
+3. The [Release workflow](.github/workflows/release.yml) fails if the tag differs from any of the
+   three versions. Otherwise it builds `comment-translate-lsp` for `x86_64-unknown-linux-musl`,
+   `aarch64-unknown-linux-musl`, `x86_64-apple-darwin`, and `aarch64-apple-darwin`, and publishes
+   a GitHub release with `comment-translate-lsp-<target>.tar.gz` archives (the binary at the
+   archive root) and `.sha256` checksums.
+4. Only after the release is published, point the Zed extension registry at the new commit:
+   until then, the new extension version has no server to download.
 
 ## C headers (`.h`)
 
@@ -331,7 +383,8 @@ heredocs, and shebangs are not translated. All of this happens before the text i
 selected translator. One translation request runs at a time; requests and queue waits are
 limited by `timeout_seconds`; on timeout, the request in flight is cancelled.
 There is no dedicated translation command: Zed's standard hover is used, so translation can
-also be triggered by hovering the mouse. Native programs are not installed automatically.
+also be triggered by hovering the mouse. The extension downloads only its own server from this
+repository's GitHub Releases (see [Connecting to Zed](#connecting-to-zed)); nothing else is installed.
 
 Documentation: [Zed extensions](https://zed.dev/docs/extensions/developing-extensions),
 [DeepL API](https://developers.deepl.com/docs), [MyMemory API](https://mymemory.translated.net/doc/spec.php).

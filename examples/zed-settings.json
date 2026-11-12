@@ -1,9 +1,6 @@
 {
   "lsp": {
     "comment-translate": {
-      "binary": {
-        "path": "/Users/jlab13/src/rust/zed_comment_tranclyate/target/release/comment-translate-lsp"
-      },
       "initialization_options": {
         "provider": "google",
         "source_language": "auto",

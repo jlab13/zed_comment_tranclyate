@@ -87,10 +87,9 @@ Translation прибрано.
 
 Інші провайдери — `"mymemory"` і `"deepl"` (див. [MyMemory](#mymemory) і [DeepL](#deepl)).
 Поле `target_language` описано в розділі [Мова перекладу](#мова-перекладу).
-Збережіть наявне поле `binary` та інші налаштування. Після перемикання перезапустіть
-мовні сервери або Zed. Приклади: [`zed-settings.json`](examples/zed-settings.json)
-і [`zed-settings-google.json`](examples/zed-settings-google.json). Для Linux є
-[`zed-settings-linux.json`](examples/zed-settings-linux.json): замініть шлях до сервера.
+Збережіть інші налаштування. Після перемикання перезапустіть мовні сервери або Zed. Приклади:
+[`zed-settings.json`](examples/zed-settings.json) (Google) і
+[`zed-settings-deepl.json`](examples/zed-settings-deepl.json) (DeepL з файлом ключа).
 
 Google працює без API-ключів, але потребує інтернету та надсилає
 текст коментаря Google. Використовується веб endpoint
@@ -238,12 +237,42 @@ MyMemory, Google — на MyMemory, а MyMemory — нікуди. Список �
 
 ## Підключення до Zed
 
+Розширення не містить мовного сервера. Воно запускає перший знайдений:
+
+1. шлях із `lsp.comment-translate.binary.path` в налаштуваннях Zed;
+2. `comment-translate-lsp` із `PATH`;
+3. інакше — сервер, автоматично завантажений із релізу GitHub, тег якого відповідає версії
+   розширення (розширення 0.1.0 бере реліз `v0.1.0`, тож вони завжди сумісні).
+   Готові сервери є для macOS (Apple Silicon та Intel) і Linux (x86_64 та aarch64, статична
+   збірка musl, що працює в будь-якому дистрибутиві). Zed показує хід завантаження; архів
+   розпаковується у власний робочий каталог розширення, а старі версії після оновлення
+   видаляються.
+
+На інших платформах (Windows, 32-бітний x86) або для власної збірки вкажіть абсолютний шлях
+(відносний Zed відраховує від робочого каталогу розширення, а не від проєкту):
+
+```json
+{
+  "lsp": {
+    "comment-translate": {
+      "binary": {
+        "path": "/absolute/path/to/comment-translate-lsp"
+      }
+    }
+  }
+}
+```
+
+Щоб випробувати розширення з вихідного коду:
+
 1. Виконайте `./scripts/build.sh`.
 2. У палітрі Zed виконайте `zed: install dev extension` і виберіть корінь проєкту.
-3. Додайте потрібні поля з [`examples/zed-settings.json`](examples/zed-settings.json)
-   в особисті налаштування Zed. Перевірте абсолютний шлях до LSP.
-4. Після зміни `initialization_options` перезапустіть мовні сервери або Zed.
-5. Відкрийте файл підтримуваної мови, наведіть на коментар або поставте курсор усередину
+3. Вкажіть у `binary.path` абсолютний шлях до `target/release/comment-translate-lsp` або додайте
+   бінарний файл до `PATH`; інакше розширення завантажить випущений сервер своєї версії.
+4. Додайте потрібні поля `initialization_options` з
+   [`examples/zed-settings.json`](examples/zed-settings.json) в особисті налаштування Zed.
+5. Після зміни `binary` або `initialization_options` перезапустіть мовні сервери або Zed.
+6. Відкрийте файл підтримуваної мови, наведіть на коментар або поставте курсор усередину
    коментаря та викличте `editor: hover`. Приклад гарячої клавіші `ctrl-alt-t` наведено
    в [`examples/keymap.json`](examples/keymap.json).
 
@@ -255,6 +284,29 @@ Swift і Dart з’являються в Zed лише після встанов�
 Поза коментарями перекладач не викликається.
 Для англомовного коду можна встановити `"source_language": "en"`: визначення мови
 дуже коротких коментарів може бути неточним. Типове значення — `auto`.
+
+### Релізи
+
+Розширення завантажує лише реліз сервера власної версії, тому версія має збігатися в
+`extension.toml`, `Cargo.toml` (`comment-translate`) і `server/Cargo.toml`
+(`comment-translate-lsp`); це перевіряє `cargo test`.
+
+1. Змініть `version` в усіх трьох файлах, виконайте `cargo check --workspace`, щоб `Cargo.lock`
+   отримав нову версію, і закомітьте ці чотири файли.
+2. Позначте коміт тегом і надішліть тег:
+
+   ```sh
+   git tag v0.2.0
+   git push origin v0.2.0
+   ```
+
+3. [Workflow Release](.github/workflows/release.yml) завершується помилкою, якщо тег відрізняється
+   від будь-якої з трьох версій. Інакше він збирає `comment-translate-lsp` для
+   `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, `x86_64-apple-darwin` і
+   `aarch64-apple-darwin` та публікує реліз GitHub з архівами `comment-translate-lsp-<target>.tar.gz`
+   (бінарний файл у корені архіву) і контрольними сумами `.sha256`.
+4. Лише після публікації релізу оновіть коміт розширення в реєстрі розширень Zed: доти новій
+   версії розширення нема звідки завантажити сервер.
 
 ## Заголовки C (`.h`)
 
@@ -335,7 +387,8 @@ Markdown, тому їхній hover показується як Markdown: бло
 один запит перекладу; запити й очікування черги обмежуються `timeout_seconds`, а за тайм-ауту
 поточний запит скасовується.
 Власної команди перекладу немає: використовується стандартний hover Zed, тому переклад
-може запускатися й наведенням миші. Автоматичного встановлення нативних програм немає.
+може запускатися й наведенням миші. Розширення завантажує лише власний сервер із GitHub Releases
+цього репозиторію (див. [Підключення до Zed](#підключення-до-zed)); нічого іншого не встановлюється.
 
 Документація: [розширення Zed](https://zed.dev/docs/extensions/developing-extensions),
 [DeepL API](https://developers.deepl.com/docs), [MyMemory API](https://mymemory.translated.net/doc/spec.php).

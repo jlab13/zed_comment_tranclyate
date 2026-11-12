@@ -1,0 +1,11 @@
+{
+  "lsp": {
+    "comment-translate": {
+      "initialization_options": {
+        "provider": "deepl",
+        "deepl_key_file": "~/.local/state/omarchy/translate-deepl.key",
+        "fallback": ["google", "mymemory"]
+      }
+    }
+  }
+}

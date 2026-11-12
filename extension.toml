@@ -20,3 +20,9 @@ languages = ["C", "C++", "Rust", "Python", "Shell Script", "Swift", "Dart"]
 "Shell Script" = "shellscript"
 "Swift" = "swift"
 "Dart" = "dart"
+
+# Сервер завантажується лише з релізів цього репозиторію.
+[[capabilities]]
+kind = "download_file"
+host = "github.com"
+path = ["jlab13", "zed_comment_tranclyate", "releases", "download", "**"]
