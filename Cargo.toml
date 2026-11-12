@@ -3,6 +3,8 @@ name = "comment-translate"
 version = "0.1.0"
 edition = "2021"
 publish = false
+# examples/ містить налаштування Zed і демо-файли, а не приклади Cargo.
+autoexamples = false
 
 [lib]
 crate-type = ["cdylib"]
