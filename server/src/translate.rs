@@ -1,3 +1,4 @@
+use crate::deepl;
 use crate::google;
 use crate::locale::{self, TargetLanguage};
 use crate::mymemory;
@@ -13,21 +14,23 @@ use std::{
 };
 use tokio::{sync::Mutex, time::timeout};
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
     Apple,
     #[default]
     Google,
     MyMemory,
+    DeepL,
 }
 
 impl Provider {
-    fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             Self::Apple => "Apple Translation",
             Self::Google => "Google Translate",
             Self::MyMemory => "MyMemory",
+            Self::DeepL => "DeepL",
         }
     }
 
@@ -36,16 +39,18 @@ impl Provider {
             Self::Apple => "apple",
             Self::Google => "google",
             Self::MyMemory => "mymemory",
+            Self::DeepL => "deepl",
         }
     }
-}
 
-/// Запасний рушій, коли Google не відповідає, обмежує запити або повертає помилку.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum Fallback {
-    MyMemory,
-    None,
+    /// Запасні рушії без поля `fallback`, у тому самому порядку, що й у плагіні перекладу Omarchy.
+    fn default_fallback(self) -> Vec<Provider> {
+        match self {
+            Self::DeepL => vec![Self::Google, Self::MyMemory],
+            Self::Google => vec![Self::MyMemory],
+            Self::MyMemory | Self::Apple => Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -55,10 +60,14 @@ pub struct Config {
     pub source_language: String,
     /// Мова перекладу; відсутнє поле або `auto` означає мову системної локалі.
     pub target_language: Option<String>,
-    /// Запасний рушій для Google; без поля — MyMemory. Apple ніколи не перемикається.
-    pub fallback: Option<Fallback>,
+    /// Запасні рушії по черзі: `"none"`, назва провайдера або список. Без поля
+    /// DeepL переходить на Google і MyMemory, Google — на MyMemory. Apple ніколи не перемикається.
+    #[serde(deserialize_with = "deserialize_fallback")]
+    pub fallback: Option<Vec<Provider>>,
     /// Адреса для MyMemory: піднімає анонімний денний ліміт.
     pub mymemory_email: Option<String>,
+    /// Файл із ключем DeepL; без нього ключ береться зі змінної `DEEPL_AUTH_KEY`.
+    pub deepl_key_file: Option<String>,
     pub timeout_seconds: u64,
     pub max_comment_chars: usize,
 }
@@ -71,11 +80,38 @@ impl Default for Config {
             target_language: None,
             fallback: None,
             mymemory_email: None,
+            deepl_key_file: None,
             timeout_seconds: 60,
             max_comment_chars: 4000,
         }
     }
 }
+
+const FALLBACK_ERROR: &str =
+    "fallback має бути \"none\", назвою провайдера (google, mymemory, deepl) або їх списком";
+
+fn deserialize_fallback<'de, D>(deserializer: D) -> Result<Option<Vec<Provider>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Setting {
+        One(String),
+        Many(Vec<Provider>),
+    }
+    let invalid = || serde::de::Error::custom(FALLBACK_ERROR);
+    match Setting::deserialize(deserializer).map_err(|_| invalid())? {
+        Setting::Many(list) => Ok(Some(list)),
+        Setting::One(name) if name == "none" => Ok(Some(Vec::new())),
+        Setting::One(name) => serde_json::from_value(serde_json::Value::String(name))
+            .map(|provider| Some(vec![provider]))
+            .map_err(|_| invalid()),
+    }
+}
+
+const MISSING_DEEPL_KEY: &str =
+    "Ключ DeepL не задано: вкажіть deepl_key_file або змінну оточення DEEPL_AUTH_KEY.";
 
 impl Config {
     pub fn validate(&self) -> Result<(), String> {
@@ -87,11 +123,23 @@ impl Config {
             return Err("source_language має бути auto або кодом мови, наприклад en".into());
         }
         explicit_target(self.target_language.as_deref())?;
-        if self.provider != Provider::Google && self.fallback == Some(Fallback::MyMemory) {
-            return Err(
-                "fallback: mymemory працює лише з provider: google; Apple ніколи не перемикається на онлайн-сервіси"
-                    .into(),
-            );
+        if let Some(fallback) = &self.fallback {
+            if self.provider == Provider::Apple && !fallback.is_empty() {
+                return Err(
+                    "Apple ніколи не перемикається на онлайн-сервіси: приберіть fallback".into(),
+                );
+            }
+            for (index, provider) in fallback.iter().enumerate() {
+                if *provider == Provider::Apple
+                    || *provider == self.provider
+                    || fallback[..index].contains(provider)
+                {
+                    return Err(format!(
+                        "fallback не може містити apple, сам провайдер ({}) чи повтори",
+                        self.provider.id()
+                    ));
+                }
+            }
         }
         validate_email(self.mymemory_email.as_deref())?;
         if !(1..=300).contains(&self.timeout_seconds)
@@ -102,9 +150,27 @@ impl Config {
         Ok(())
     }
 
-    /// Google переходить на MyMemory, якщо запасний рушій не вимкнено.
-    fn uses_fallback(&self) -> bool {
-        self.provider == Provider::Google && self.fallback != Some(Fallback::None)
+    /// Провайдер і запасні рушії в порядку спроб.
+    pub fn chain(&self) -> Vec<Provider> {
+        let fallback = self
+            .fallback
+            .clone()
+            .unwrap_or_else(|| self.provider.default_fallback());
+        std::iter::once(self.provider).chain(fallback).collect()
+    }
+
+    /// Ключ DeepL, якщо DeepL є серед рушіїв; `Err` пояснює, чому ключа немає.
+    pub fn deepl_key(&self) -> Option<Result<String, String>> {
+        if !self.chain().contains(&Provider::DeepL) {
+            return None;
+        }
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        let key = deepl::load_key(
+            self.deepl_key_file.as_deref(),
+            |name| std::env::var(name).ok(),
+            home,
+        );
+        Some(key.and_then(|key| key.ok_or_else(|| MISSING_DEEPL_KEY.into())))
     }
 
     /// Явна мова з налаштувань або мова системи, яку повертає `detect`.
@@ -160,57 +226,99 @@ trait Engine: Send + Sync {
     async fn translate(&self, text: &str, config: &Config, target: &str) -> Result<String, String>;
 }
 
-/// Скільки не звертатися до Google після HTTP 429 чи 403, якщо є запасний рушій.
-const GOOGLE_PAUSE: Duration = Duration::from_secs(300);
+/// Скільки пропускати сервіс після ліміту, вичерпаної квоти чи відхиленого ключа.
+const PAUSE: Duration = Duration::from_secs(300);
 
-#[derive(Default)]
 struct ProviderEngine {
-    // До цього моменту Google пропускається: він уже відмовляє, тож не смикаємо його.
-    google_paused_until: std::sync::Mutex<Option<Instant>>,
+    /// Ключ DeepL або причина, чому його немає.
+    deepl_key: Result<String, String>,
+    // До цього моменту сервіс пропускається: він уже відмовляє, тож не смикаємо його.
+    paused_until: std::sync::Mutex<HashMap<Provider, Instant>>,
 }
 
 impl ProviderEngine {
-    fn google_paused(&self) -> bool {
-        self.google_paused_until
+    fn new(deepl_key: Option<Result<String, String>>) -> Self {
+        Self {
+            deepl_key: deepl_key.unwrap_or_else(|| Err(MISSING_DEEPL_KEY.into())),
+            paused_until: std::sync::Mutex::default(),
+        }
+    }
+
+    fn paused(&self, provider: Provider) -> bool {
+        self.paused_until
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .is_some_and(|until| Instant::now() < until)
+            .get(&provider)
+            .is_some_and(|until| Instant::now() < *until)
     }
 
-    fn pause_google(&self) {
-        *self
-            .google_paused_until
+    fn pause(&self, provider: Provider) {
+        self.paused_until
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(Instant::now() + GOOGLE_PAUSE);
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(provider, Instant::now() + PAUSE);
     }
 
-    async fn google(&self, text: &str, config: &Config, target: &str) -> Result<String, String> {
+    async fn call(
+        &self,
+        provider: Provider,
+        text: &str,
+        config: &Config,
+        target: &str,
+        deadline: Duration,
+    ) -> Result<String, String> {
         let source = &config.source_language;
-        let deadline = Duration::from_secs(config.timeout_seconds);
-        if !config.uses_fallback() {
-            return google::translate(text, source, target, deadline)
+        match provider {
+            Provider::Google => google::translate(text, source, target, deadline)
                 .await
-                .map(|reply| reply.translation);
-        }
-        let email = config.mymemory_email.as_deref();
-        if self.google_paused() {
-            return mymemory::translate(text, source, target, email, deadline).await;
-        }
-        // Половина часу лишається MyMemory, щоб повільний Google не з’їв увесь тайм-аут.
-        let half = deadline / 2;
-        match google::translate(text, source, target, half).await {
-            Ok(reply) => Ok(reply.translation),
-            Err(error) => {
-                if google::throttled(&error) {
-                    self.pause_google();
-                }
-                // Stderr потрапляє в журнал мовного сервера Zed; stdout зайнятий протоколом LSP.
-                eprintln!("{error} Переклад через MyMemory.");
-                mymemory::translate(text, source, target, email, half)
-                    .await
-                    .map_err(|fallback| format!("{error}\nMyMemory: {fallback}"))
+                .map(|reply| reply.translation),
+            Provider::MyMemory => {
+                let email = config.mymemory_email.as_deref();
+                mymemory::translate(text, source, target, email, deadline).await
             }
+            Provider::DeepL => match &self.deepl_key {
+                Ok(key) => deepl::translate(text, source, target, key, deadline).await,
+                Err(reason) => Err(reason.clone()),
+            },
+            Provider::Apple => apple(text, config, target, deadline).await,
         }
+    }
+}
+
+async fn apple(
+    text: &str,
+    config: &Config,
+    target: &str,
+    deadline: Duration,
+) -> Result<String, String> {
+    #[cfg(all(target_os = "macos", feature = "apple"))]
+    {
+        let payload = json!({"provider":"apple", "text":text, "source_language":config.source_language, "target_language":target}).to_string();
+        let response = native::request(payload, deadline).await?;
+        let response: Response = serde_json::from_str(&response)
+            .map_err(|_| "Некоректна відповідь бібліотеки Apple Translation")?;
+        if let Some(error) = response.error {
+            return Err(error);
+        }
+        response
+            .translation
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "Apple Translation повернув порожній переклад".into())
+    }
+    #[cfg(not(all(target_os = "macos", feature = "apple")))]
+    {
+        let _ = (text, config, target, deadline);
+        Err(apple_unavailable())
+    }
+}
+
+/// Сервіс обмежив запити, вичерпав квоту або відхилив ключ.
+fn throttled(provider: Provider, error: &str) -> bool {
+    match provider {
+        Provider::Google => google::throttled(error),
+        Provider::MyMemory => mymemory::throttled(error),
+        Provider::DeepL => deepl::throttled(error),
+        Provider::Apple => false,
     }
 }
 
@@ -220,41 +328,34 @@ impl Engine for ProviderEngine {
         if same_language(&config.source_language, target) {
             return Ok(text.to_owned());
         }
-        match config.provider {
-            Provider::Google => self.google(text, config, target).await,
-            Provider::MyMemory => {
-                mymemory::translate(
-                    text,
-                    &config.source_language,
-                    target,
-                    config.mymemory_email.as_deref(),
-                    Duration::from_secs(config.timeout_seconds),
-                )
-                .await
+        let chain = config.chain();
+        // Кожна спроба отримує рівну частку часу, щоб повільний сервіс не з’їв увесь тайм-аут.
+        let share = Duration::from_secs(config.timeout_seconds) / chain.len() as u32;
+        let mut errors = Vec::new();
+        for (index, &provider) in chain.iter().enumerate() {
+            let next = chain.get(index + 1).copied();
+            // Сервіс, що недавно відмовив, і DeepL без ключа пропускаються, поки є запасні.
+            // Про відсутній ключ уже повідомлено в журналі під час запуску.
+            let unavailable =
+                self.paused(provider) || (provider == Provider::DeepL && self.deepl_key.is_err());
+            if unavailable && next.is_some() {
+                continue;
             }
-            Provider::Apple => {
-                #[cfg(all(target_os = "macos", feature = "apple"))]
-                {
-                    let payload = json!({"provider":"apple", "text":text, "source_language":config.source_language, "target_language":target}).to_string();
-                    let response =
-                        native::request(payload, Duration::from_secs(config.timeout_seconds))
-                            .await?;
-                    let response: Response = serde_json::from_str(&response)
-                        .map_err(|_| "Некоректна відповідь бібліотеки Apple Translation")?;
-                    if let Some(error) = response.error {
-                        return Err(error);
+            match self.call(provider, text, config, target, share).await {
+                Ok(translation) => return Ok(translation),
+                Err(error) => {
+                    if throttled(provider, &error) {
+                        self.pause(provider);
                     }
-                    response
-                        .translation
-                        .filter(|value| !value.trim().is_empty())
-                        .ok_or_else(|| "Apple Translation повернув порожній переклад".into())
-                }
-                #[cfg(not(all(target_os = "macos", feature = "apple")))]
-                {
-                    Err(apple_unavailable())
+                    if let Some(next) = next {
+                        // Stderr потрапляє в журнал мовного сервера Zed; stdout зайнятий протоколом LSP.
+                        eprintln!("{error} Переклад через {}.", next.name());
+                    }
+                    errors.push(error);
                 }
             }
         }
+        Err(errors.join("\n"))
     }
 }
 
@@ -269,10 +370,12 @@ pub struct Translator {
 
 impl Translator {
     pub fn new(config: Config, target: TargetLanguage) -> Self {
+        // Ключ DeepL читається один раз під час запуску; після зміни файлу перезапустіть сервер.
+        let engine = Arc::new(ProviderEngine::new(config.deepl_key()));
         Self {
             config,
             target,
-            engine: Arc::new(ProviderEngine::default()),
+            engine,
             cache: Mutex::new(HashMap::new()),
             gate: Mutex::new(()),
         }
@@ -365,6 +468,7 @@ struct DiagnosticRequest {
     source_language: Option<String>,
     target_language: Option<String>,
     mymemory_email: Option<String>,
+    deepl_key_file: Option<String>,
     timeout_seconds: Option<u64>,
 }
 
@@ -399,7 +503,27 @@ pub async fn diagnose(input: &str) -> Result<serde_json::Value, String> {
     }
     validate_email(request.mymemory_email.as_deref())?;
     let id = provider.id();
+    let deadline = Duration::from_secs(seconds);
+    let deepl_key = || -> Result<String, String> {
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        deepl::load_key(
+            request.deepl_key_file.as_deref(),
+            |name| std::env::var(name).ok(),
+            home,
+        )?
+        .ok_or_else(|| MISSING_DEEPL_KEY.into())
+    };
     match request.operation.as_deref() {
+        // Для DeepL перевірка справжня: запит використання квоти перевіряє і ключ.
+        Some("check") if provider == Provider::DeepL => {
+            let key = deepl_key()?;
+            let usage = deepl::usage(&key, deadline).await?;
+            return Ok(json!({
+                "provider":id, "status":"ready", "plan":deepl::plan(&key),
+                "character_count":usage.used, "character_limit":usage.limit,
+                "target_language":target
+            }));
+        }
         Some("check") => {
             return Ok(
                 json!({"provider":id, "status":"network_required", "target_language":target}),
@@ -423,15 +547,22 @@ pub async fn diagnose(input: &str) -> Result<serde_json::Value, String> {
             json!({"provider":id, "translation":text, "source_language":source, "target_language":target}),
         );
     }
-    let deadline = Duration::from_secs(seconds);
-    // CLI перевіряє саме вибраний сервіс, тому запасний рушій тут не вмикається.
-    let (translation, source) = if provider == Provider::MyMemory {
-        let email = request.mymemory_email.as_deref();
-        let translation = mymemory::translate(&text, &source, &target, email, deadline).await?;
-        (translation, source)
-    } else {
-        let reply = google::translate(&text, &source, &target, deadline).await?;
-        (reply.translation, reply.source_language)
+    // CLI перевіряє саме вибраний сервіс, тому запасні рушії тут не вмикаються.
+    let (translation, source) = match provider {
+        Provider::MyMemory => {
+            let email = request.mymemory_email.as_deref();
+            let translation = mymemory::translate(&text, &source, &target, email, deadline).await?;
+            (translation, source)
+        }
+        Provider::DeepL => {
+            let translation =
+                deepl::translate(&text, &source, &target, &deepl_key()?, deadline).await?;
+            (translation, source)
+        }
+        _ => {
+            let reply = google::translate(&text, &source, &target, deadline).await?;
+            (reply.translation, reply.source_language)
+        }
     };
     Ok(
         json!({"provider":id, "translation":translation, "source_language":source, "target_language":target}),
@@ -649,7 +780,7 @@ mod tests {
                 .unwrap(),
             "Викличте next_value() і `MAX_SIZE`."
         );
-        assert_eq!(*engine.requests.lock().unwrap(), ["Call x0_ and x1_."]);
+        assert_eq!(*engine.requests.lock().unwrap(), ["Call x0_() and x1_."]);
     }
 
     #[tokio::test]
@@ -661,7 +792,7 @@ mod tests {
         );
         assert_eq!(
             *engine.requests.lock().unwrap(),
-            ["Call x0_.", "Call next_value()."]
+            ["Call x0_().", "Call next_value()."]
         );
     }
 
@@ -740,7 +871,7 @@ mod tests {
             source_language: "de".into(),
             ..Config::default()
         };
-        let text = ProviderEngine::default()
+        let text = ProviderEngine::new(None)
             .translate("Der Wert 😀", &config, "de-AT")
             .await
             .unwrap();
@@ -763,32 +894,52 @@ mod tests {
     }
 
     #[test]
-    fn google_falls_back_to_mymemory_unless_disabled() {
+    fn default_chains_follow_the_omarchy_plugin_order() {
+        use Provider::{DeepL, Google, MyMemory};
         let config = |json: &str| serde_json::from_str::<Config>(json).unwrap();
-        assert!(config("{}").uses_fallback());
-        assert!(config(r#"{"fallback":"mymemory"}"#).uses_fallback());
-        assert!(!config(r#"{"fallback":"none"}"#).uses_fallback());
-        let direct = config(r#"{"provider":"mymemory"}"#);
-        assert_eq!(direct.provider, Provider::MyMemory);
-        assert!(direct.validate().is_ok());
-        assert!(!direct.uses_fallback());
-        assert!(serde_json::from_str::<Config>(r#"{"fallback":"google"}"#).is_err());
+        assert_eq!(config("{}").chain(), [Google, MyMemory]);
+        assert_eq!(
+            config(r#"{"provider":"deepl"}"#).chain(),
+            [DeepL, Google, MyMemory]
+        );
+        assert_eq!(config(r#"{"provider":"mymemory"}"#).chain(), [MyMemory]);
+        // Попередні значення `"mymemory"` і `"none"` залишаються дійсними.
+        assert_eq!(config(r#"{"fallback":"none"}"#).chain(), [Google]);
+        assert_eq!(
+            config(r#"{"fallback":"mymemory"}"#).chain(),
+            [Google, MyMemory]
+        );
+        assert_eq!(
+            config(r#"{"provider":"deepl","fallback":["mymemory"]}"#).chain(),
+            [DeepL, MyMemory]
+        );
+        assert_eq!(
+            config(r#"{"provider":"mymemory","fallback":"deepl"}"#).chain(),
+            [MyMemory, DeepL]
+        );
+        for json in [
+            r#"{"fallback":"bing"}"#,
+            r#"{"fallback":["google", 1]}"#,
+            r#"{"fallback":true}"#,
+        ] {
+            let error = serde_json::from_str::<Config>(json).err().unwrap();
+            assert!(error.to_string().contains("fallback"), "{json}");
+        }
     }
 
     #[test]
-    fn only_google_accepts_an_explicit_fallback() {
-        let config = Config {
-            provider: Provider::MyMemory,
-            fallback: Some(Fallback::MyMemory),
-            ..Config::default()
-        };
-        assert!(config.validate().unwrap_err().contains("provider: google"));
-        let config = Config {
-            provider: Provider::MyMemory,
-            fallback: Some(Fallback::None),
-            ..Config::default()
-        };
-        assert!(config.validate().is_ok());
+    fn rejects_fallback_to_itself_apple_or_repeats() {
+        for json in [
+            r#"{"fallback":"google"}"#,
+            r#"{"fallback":["mymemory","mymemory"]}"#,
+            r#"{"provider":"deepl","fallback":["apple"]}"#,
+        ] {
+            let config: Config = serde_json::from_str(json).unwrap();
+            assert!(
+                config.validate().unwrap_err().contains("fallback"),
+                "{json}"
+            );
+        }
     }
 
     #[test]
@@ -819,13 +970,54 @@ mod tests {
     }
 
     #[test]
-    fn google_is_paused_after_a_rate_limit() {
-        let engine = ProviderEngine::default();
-        assert!(!engine.google_paused());
-        engine.pause_google();
-        assert!(engine.google_paused());
-        *engine.google_paused_until.lock().unwrap() = Some(Instant::now());
-        assert!(!engine.google_paused());
+    fn each_provider_is_paused_separately() {
+        let engine = ProviderEngine::new(None);
+        assert!(!engine.paused(Provider::Google));
+        engine.pause(Provider::Google);
+        assert!(engine.paused(Provider::Google));
+        assert!(!engine.paused(Provider::MyMemory));
+        engine
+            .paused_until
+            .lock()
+            .unwrap()
+            .insert(Provider::Google, Instant::now());
+        assert!(!engine.paused(Provider::Google));
+    }
+
+    #[test]
+    fn deepl_key_is_read_only_when_deepl_is_in_the_chain() {
+        let config: Config =
+            serde_json::from_str(r#"{"deepl_key_file":"/nonexistent/deepl.key"}"#).unwrap();
+        assert!(config.deepl_key().is_none());
+        let config: Config = serde_json::from_str(
+            r#"{"provider":"deepl","deepl_key_file":"/nonexistent/deepl.key"}"#,
+        )
+        .unwrap();
+        assert!(config
+            .deepl_key()
+            .unwrap()
+            .unwrap_err()
+            .contains("deepl_key_file"));
+    }
+
+    #[tokio::test]
+    async fn deepl_without_a_key_fails_without_network() {
+        let config = Config {
+            provider: Provider::DeepL,
+            fallback: Some(Vec::new()),
+            ..Config::default()
+        };
+        let error = ProviderEngine::new(Some(Err(MISSING_DEEPL_KEY.into())))
+            .translate("Hello", &config, "uk")
+            .await
+            .unwrap_err();
+        assert!(error.contains("DEEPL_AUTH_KEY"));
+        assert!(diagnose(
+            r#"{"provider":"deepl","operation":"check","deepl_key_file":"/nonexistent/deepl.key"}"#
+        )
+        .await
+        .unwrap_err()
+        .contains("deepl_key_file"));
     }
 
     #[tokio::test]

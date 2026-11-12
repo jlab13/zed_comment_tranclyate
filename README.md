@@ -5,7 +5,7 @@
 An extension for **macOS and Linux** that shows a translation of the comment under the cursor
 in Zed's standard hover popup, in the system language (or the language set in `target_language`).
 The default provider on both macOS and Linux is **Google Translate**, which needs no API key;
-when Google does not answer, it falls back to **MyMemory**.
+when Google does not answer, it falls back to **MyMemory**. **DeepL** works on your own API key.
 **Apple Translation** is available on macOS 26+ through configuration.
 Supports **C, C++, Rust, Python, Shell Script (Bash), Swift, and Dart**: line, block,
 and documentation comments, plus Python docstrings. Tree-sitter tells strings, raw strings,
@@ -25,6 +25,7 @@ interpolation, and heredocs apart from comments. The code in the file is never m
 ```text
 Zed → WASM extension → Rust LSP → Google Translate (Rust, all platforms)
                              ↳ MyMemory (Rust, fallback for Google)
+                             → DeepL (Rust, own API key; falls back to Google and MyMemory)
                              → Apple Translation (Swift, macOS only)
 ```
 
@@ -35,6 +36,7 @@ Zed → WASM extension → Rust LSP → Google Translate (Rust, all platforms)
 - `server/src/locale.rs` — resolves the target language from the system locale.
 - `server/src/google.rs` — the shared Google HTTP client built on reqwest/rustls.
 - `server/src/mymemory.rs` — the MyMemory client: request chunking, quota and error handling.
+- `server/src/deepl.rs` — the DeepL client: key loading, endpoint by plan, language variants, usage.
 - `native/` — the Swift Apple translator, strategy selection, and the C-compatible bridge.
 - `server/build.rs` — links Swift only on macOS with the `apple` feature.
 - `examples/` — Zed settings, a key binding, and demo files with English comments for every supported language.
@@ -51,8 +53,8 @@ The target language comes from the system locale or from `target_language` (see
 If the source language matches the target language, the text is returned unchanged.
 On macOS 26.4+, Apple checks `highFidelity` first and then `lowLatency`; translation runs
 locally. Google uses the portable Rust reqwest HTTP client with rustls TLS and needs internet access.
-Apple never switches to another provider. Google falls back to MyMemory unless
-`"fallback": "none"` is set (see [MyMemory](#mymemory)).
+Apple never switches to another provider. DeepL falls back to Google and MyMemory, and Google to
+MyMemory, unless `fallback` says otherwise (see [Fallback order](#fallback-order)).
 Up to 256 successful results are cached in memory; when the cache is full, it is cleared.
 
 ## Building
@@ -136,8 +138,8 @@ Translated S.r.l. (Italy). It needs no key and is called openly as
 be reached, rate-limits requests, or returns an error, the same paragraph goes to MyMemory, and
 the reason is written to the language server log. After HTTP 429 or 403 from Google, the server
 skips Google for 5 minutes and sends requests straight to MyMemory instead of hitting a service
-that is already refusing them. When fallback is enabled, Google gets half of `timeout_seconds`
-and MyMemory the other half. If both fail, the hover shows both reasons. Apple never falls back.
+that is already refusing them. Each service in the chain gets an equal share of
+`timeout_seconds`. If every service fails, the hover shows all reasons. Apple never falls back.
 
 ```json
 {
@@ -169,6 +171,56 @@ Checking MyMemory from the CLI (the CLI tests the selected service only, without
 echo '{"provider":"mymemory","text":"Return the next counter value.","source_language":"en"}' \
   | ./target/release/comment-translate-lsp --translate
 ```
+
+### DeepL
+
+[DeepL](https://www.deepl.com/pro-api) is an optional provider on your own API key; the DeepL API
+Free plan has a monthly character quota, and the CLI check below shows yours. With `"provider": "deepl"` the order is
+DeepL → Google → MyMemory, the same as in the Omarchy translate plugin.
+
+```json
+{
+  "lsp": {
+    "comment-translate": {
+      "initialization_options": {
+        "provider": "deepl",
+        "deepl_key_file": "~/.local/state/omarchy/translate-deepl.key"
+      }
+    }
+  }
+}
+```
+
+- The key is never stored in Zed settings: the server reads it from `deepl_key_file` (a leading
+  `~/` is expanded) or, without that field, from the `DEEPL_AUTH_KEY` environment variable. The
+  key file saved by the Omarchy translate plugin works as is. Keep the file private (`chmod 600`).
+- Keys ending in `:fx` (Free plan) go to `api-free.deepl.com`, others to `api.deepl.com`, as a JSON
+  POST with the key in the `Authorization` header — never in a URL or the log. The log shows only
+  the plan, or why DeepL is skipped.
+- The key is read once when the server starts; restart the language server after changing it.
+- Without a key, DeepL is skipped and the next service translates. After HTTP 403 (key rejected),
+  429, or 456 (monthly quota spent), DeepL is skipped for 5 minutes.
+- English and Portuguese targets need a variant on DeepL: `en-GB` or `pt-PT` in `target_language`
+  selects British English or European Portuguese, otherwise American English and Brazilian
+  Portuguese are used.
+- Comment text goes to DeepL SE (Germany).
+
+Checking the key and the month's usage from the CLI:
+
+```sh
+echo '{"provider":"deepl","operation":"check","deepl_key_file":"~/.local/state/omarchy/translate-deepl.key"}' \
+  | ./target/release/comment-translate-lsp --translate
+```
+
+`"status":"ready"` comes with `plan`, `character_count`, and `character_limit`.
+
+### Fallback order
+
+`fallback` sets the services tried after the provider, in order: `"none"`, one provider name, or a
+list such as `["google", "mymemory"]`. Without the field, DeepL falls back to Google and MyMemory,
+Google to MyMemory, and MyMemory to nothing. Apple never falls back, and the list cannot contain
+`apple`, the provider itself, or repeats. The order is written to the language server log at startup.
+For example, `"provider": "deepl", "fallback": ["mymemory"]` never sends comments to Google.
 
 ## Translation language
 
@@ -296,7 +348,8 @@ The translator receives only prose; code never reaches it.
   `\code … \endcode`, and `@verbatim … @endverbatim`, and Python doctest examples (`>>>`
   up to the next blank line) — are shown verbatim and never sent for translation. The prose
   paragraphs around them are translated and cached separately.
-- **Code inside sentences** is replaced with `x0_`, `x1_`, … labels before translation and put
+- **Code inside sentences** is replaced with `x0_`, `x1_`, … labels (`x0_()` for a function call, so
+  DeepL does not read it as a phone number) before translation and put
   back afterwards: inline code in backticks, identifiers that look like code (`next_value()`,
   `MAX_SIZE`, `nextValue`, `HashMap`, `std::mem::swap`, `node->next`), URLs, Doxygen commands
   with parameter names (`@param[in] node`), and reST fields (`:param count:`). Ordinary words,

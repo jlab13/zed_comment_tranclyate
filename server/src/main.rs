@@ -1,4 +1,5 @@
 mod comments;
+mod deepl;
 mod google;
 mod languages;
 mod locale;
@@ -41,6 +42,25 @@ impl LanguageServer for Backend {
                 format!("Мова перекладу: {} ({})", target.code, target.origin),
             )
             .await;
+        let chain: Vec<_> = config.chain().into_iter().map(|p| p.name()).collect();
+        self.client
+            .log_message(
+                MessageType::INFO,
+                format!("Порядок перекладу: {}", chain.join(" → ")),
+            )
+            .await;
+        // Сам ключ ніколи не потрапляє в журнал: лише план або причина, чому DeepL пропускається.
+        match config.deepl_key() {
+            Some(Ok(key)) => {
+                let message = format!("DeepL: ключ знайдено, план {}", deepl::plan(&key));
+                self.client.log_message(MessageType::INFO, message).await;
+            }
+            Some(Err(reason)) => {
+                let message = format!("{reason} DeepL пропускається.");
+                self.client.log_message(MessageType::WARNING, message).await;
+            }
+            None => {}
+        }
         *self.translator.write().await = Arc::new(Translator::new(config, target));
         Ok(InitializeResult {
             capabilities: ServerCapabilities {

@@ -66,6 +66,12 @@ class AppleTranslateTests(unittest.TestCase):
         self.assertEqual(body["provider"], "mymemory")
         self.assertEqual(body["status"], "network_required")
 
+    def test_deepl_without_a_key_fails_before_any_request(self):
+        status, body = self.invoke(json.dumps({"provider": "deepl", "operation": "check",
+                                               "deepl_key_file": "/nonexistent/deepl.key"}))
+        self.assertNotEqual(status, 0)
+        self.assertIn("deepl_key_file", body["error"])
+
     def test_google_can_be_selected_without_apple_models(self):
         status, body = self.invoke(json.dumps({"provider": "google", "operation": "check"}))
         self.assertEqual(status, 0)

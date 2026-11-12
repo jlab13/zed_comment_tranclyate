@@ -104,10 +104,16 @@ struct Data {
 }
 
 const QUOTA: &str = "Денний ліміт MyMemory вичерпано. Задайте mymemory_email, щоб збільшити ліміт.";
+const RATE_LIMITED: &str = "MyMemory обмежив кількість запитів (HTTP 429).";
+
+/// MyMemory обмежив запити або вичерпав денний ліміт: варто якийсь час його пропускати.
+pub fn throttled(error: &str) -> bool {
+    error == RATE_LIMITED || error == QUOTA
+}
 
 fn decode(body: &[u8], status: u16) -> Result<String, String> {
     if status == 429 {
-        return Err("MyMemory обмежив кількість запитів (HTTP 429).".into());
+        return Err(RATE_LIMITED.into());
     }
     let invalid = || "Некоректна відповідь MyMemory.".to_owned();
     let reply: Reply = match serde_json::from_slice(body) {

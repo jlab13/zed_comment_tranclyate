@@ -103,11 +103,14 @@ pub fn split<'a>(text: &'a str) -> Vec<Segment<'a>> {
 
 // Мітка схожа на ідентифікатор: перекладач бачить у реченні код і правильніше
 // перекладає дієслова («Call x0_» → «Викличте», а з ⟦0⟧ — «Зателефонуйте»).
+// Мітка виклику функції зберігає дужки: без них DeepL читає «Call x0_» як «зателефонуйте
+// за номером», а «Call x0_()» — як виклик. Дужки, які перекладач відкинув, не заважають.
 static LABEL: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"[xX]([0-9]+)_").expect("Некоректний вираз для міток"));
+    LazyLock::new(|| Regex::new(r"[xX]([0-9]+)_(?:\(\))?").expect("Некоректний вираз для міток"));
 
-fn label(index: usize) -> String {
-    format!("x{index}_")
+fn label(index: usize, code: &str) -> String {
+    let call = code.trim_matches('`').ends_with(')');
+    format!("x{index}_{}", if call { "()" } else { "" })
 }
 
 // Порядок гілок задає пріоритет, коли кілька правил починаються в одній позиції.
@@ -186,8 +189,9 @@ pub fn mask(text: &str) -> Option<Masked> {
             continue;
         };
         masked.push_str(&text[last..start]);
-        masked.push_str(&label(spans.len()));
-        spans.push(text[start..end].to_owned());
+        let code = &text[start..end];
+        masked.push_str(&label(spans.len(), code));
+        spans.push(code.to_owned());
         last = end;
     }
     masked.push_str(&text[last..]);
@@ -339,13 +343,13 @@ mod tests {
     fn masks_inline_code_and_identifiers() {
         let (text, spans) =
             masked("Call `next_value()` or next_value(x), then read MAX_SIZE and nextValue.");
-        assert_eq!(text, "Call x0_ or x1_, then read x2_ and x3_.");
+        assert_eq!(text, "Call x0_() or x1_(), then read x2_ and x3_.");
         assert_eq!(
             spans,
             ["`next_value()`", "next_value(x)", "MAX_SIZE", "nextValue"]
         );
         let (text, spans) = masked("Use std::mem::swap, node->next, HashMap and free().");
-        assert_eq!(text, "Use x0_, x1_, x2_ and x3_.");
+        assert_eq!(text, "Use x0_, x1_, x2_ and x3_().");
         assert_eq!(spans, ["std::mem::swap", "node->next", "HashMap", "free()"]);
         let (text, _) = masked("Use ``a ` b`` here.");
         assert_eq!(text, "Use x0_ here.");
@@ -392,8 +396,24 @@ mod tests {
     }
 
     #[test]
+    fn parentheses_after_plain_code_are_not_swallowed() {
+        // `foo`() дав би «x0_()», і дужки зникли б після повернення коду; маскування відмовляється.
+        assert!(mask("Call `foo`() first.").is_none());
+        assert_eq!(
+            mask("Call `foo()` first.").unwrap().text,
+            "Call x0_() first."
+        );
+    }
+
+    #[test]
     fn restores_code_in_translated_text() {
         let masked = mask("Call next_value() and MAX_SIZE.").unwrap();
+        assert_eq!(masked.text, "Call x0_() and x1_.");
+        assert_eq!(
+            masked.restore("Викличте x0_() і x1_.").as_deref(),
+            Some("Викличте next_value() і MAX_SIZE.")
+        );
+        // Перекладач міг відкинути дужки мітки: код усе одно повертається цілим.
         assert_eq!(
             masked.restore("Викличте x0_ і x1_.").as_deref(),
             Some("Викличте next_value() і MAX_SIZE.")
