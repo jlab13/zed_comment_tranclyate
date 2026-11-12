@@ -1,6 +1,7 @@
 mod comments;
 mod deepl;
 mod google;
+mod i18n;
 mod languages;
 mod locale;
 mod mymemory;
@@ -8,6 +9,7 @@ mod segments;
 mod text;
 mod translate;
 
+use i18n::tr;
 use languages::LanguageSpec;
 use locale::TargetLanguage;
 use std::{collections::HashMap, sync::Arc};
@@ -26,6 +28,10 @@ struct Backend {
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> jsonrpc::Result<InitializeResult> {
+        // Мова повідомлень потрібна ще до перевірки, щоб і помилки налаштувань були зрозумілі.
+        i18n::set_for_target(&translate::requested_target(
+            params.initialization_options.as_ref(),
+        ));
         let config: Config = params
             .initialization_options
             .map(serde_json::from_value)
@@ -34,27 +40,41 @@ impl LanguageServer for Backend {
             .unwrap_or_default();
         config.validate().map_err(jsonrpc::Error::invalid_params)?;
         let target = config.target_language(locale::system_language);
+        i18n::set_for_target(&target.code);
         self.client
             .log_message(
                 MessageType::INFO,
-                format!("Мова перекладу: {} ({})", target.code, target.origin),
+                tr!(
+                    format!("Target language: {} ({})", target.code, target.origin),
+                    format!("Мова перекладу: {} ({})", target.code, target.origin)
+                ),
             )
             .await;
         let chain: Vec<_> = config.chain().into_iter().map(|p| p.name()).collect();
         self.client
             .log_message(
                 MessageType::INFO,
-                format!("Порядок перекладу: {}", chain.join(" → ")),
+                tr!(
+                    format!("Translation order: {}", chain.join(" → ")),
+                    format!("Порядок перекладу: {}", chain.join(" → "))
+                ),
             )
             .await;
         // Сам ключ ніколи не потрапляє в журнал: лише план або причина, чому DeepL пропускається.
         match config.deepl_key() {
             Some(Ok(key)) => {
-                let message = format!("DeepL: ключ знайдено, план {}", deepl::plan(&key));
+                let plan = deepl::plan(&key);
+                let message = tr!(
+                    format!("DeepL: key found, {plan} plan"),
+                    format!("DeepL: ключ знайдено, план {plan}")
+                );
                 self.client.log_message(MessageType::INFO, message).await;
             }
             Some(Err(reason)) => {
-                let message = format!("{reason} DeepL пропускається.");
+                let message = tr!(
+                    format!("{reason} DeepL is skipped."),
+                    format!("{reason} DeepL пропускається.")
+                );
                 self.client.log_message(MessageType::WARNING, message).await;
             }
             None => {}
@@ -133,7 +153,11 @@ impl LanguageServer for Backend {
         let translator = self.translator.read().await.clone();
         let (kind, value) = match translator.translate(&comment.text).await {
             Ok(text) => {
-                let header = format!("Переклад → {}", translator.target().code);
+                let code = &translator.target().code;
+                let header = tr!(
+                    format!("Translation → {code}"),
+                    format!("Переклад → {code}")
+                );
                 match markdown {
                     Some(fence) => (
                         MarkupKind::Markdown,
@@ -146,7 +170,10 @@ impl LanguageServer for Backend {
                 self.client.log_message(MessageType::WARNING, &error).await;
                 (
                     MarkupKind::PlainText,
-                    format!("Переклад недоступний\n\n{error}"),
+                    tr!(
+                        format!("Translation unavailable\n\n{error}"),
+                        format!("Переклад недоступний\n\n{error}")
+                    ),
                 )
             }
         };
@@ -199,7 +226,7 @@ fn main() {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .expect("Не вдалося запустити середовище LSP");
+        .expect("Could not start the LSP runtime");
     let code = runtime.block_on(async {
         if let Some(code) = diagnostics().await {
             return code;
@@ -255,10 +282,13 @@ async fn diagnostics() -> Option<i32> {
             input
         }
         _ => {
-            eprintln!("Використання: comment-translate-lsp [--check en [uk] | --translate]");
+            eprintln!("Usage: comment-translate-lsp [--check en [uk] | --translate]");
             return Some(1);
         }
     };
+    // CLI теж відповідає мовою перекладу: українською для uk, інакше англійською.
+    let request = serde_json::from_str::<serde_json::Value>(&input).ok();
+    i18n::set_for_target(&translate::requested_target(request.as_ref()));
     let (json, code) = match translate::diagnose(&input).await {
         Ok(value) => {
             let code = i32::from(!value["error"].is_null());

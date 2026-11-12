@@ -1,5 +1,6 @@
 use crate::deepl;
 use crate::google;
+use crate::i18n::tr;
 use crate::locale::{self, TargetLanguage};
 use crate::mymemory;
 use crate::segments::{self, Segment};
@@ -82,8 +83,12 @@ impl Default for Config {
     }
 }
 
-const FALLBACK_ERROR: &str =
-    "fallback має бути \"none\", назвою провайдера (google, mymemory, deepl) або їх списком";
+fn fallback_error() -> &'static str {
+    tr!(
+        "fallback must be \"none\", a provider name (google, mymemory, deepl), or a list of them",
+        "fallback має бути \"none\", назвою провайдера (google, mymemory, deepl) або їх списком"
+    )
+}
 
 fn deserialize_fallback<'de, D>(deserializer: D) -> Result<Option<Vec<Provider>>, D::Error>
 where
@@ -95,7 +100,7 @@ where
         One(String),
         Many(Vec<Provider>),
     }
-    let invalid = || serde::de::Error::custom(FALLBACK_ERROR);
+    let invalid = || serde::de::Error::custom(fallback_error());
     match Setting::deserialize(deserializer).map_err(|_| invalid())? {
         Setting::Many(list) => Ok(Some(list)),
         Setting::One(name) if name == "none" => Ok(Some(Vec::new())),
@@ -105,21 +110,31 @@ where
     }
 }
 
-const MISSING_DEEPL_KEY: &str =
-    "Ключ DeepL не задано: вкажіть deepl_key_file або змінну оточення DEEPL_AUTH_KEY.";
+fn missing_deepl_key() -> String {
+    tr!(
+        "No DeepL key: set deepl_key_file or the DEEPL_AUTH_KEY environment variable.",
+        "Ключ DeepL не задано: вкажіть deepl_key_file або змінну оточення DEEPL_AUTH_KEY."
+    )
+    .into()
+}
 
 impl Config {
     pub fn validate(&self) -> Result<(), String> {
         if self.source_language.trim().is_empty() {
-            return Err("source_language має бути auto або кодом мови, наприклад en".into());
+            return Err(tr!(
+                "source_language must be auto or a language code such as en",
+                "source_language має бути auto або кодом мови, наприклад en"
+            )
+            .into());
         }
         explicit_target(self.target_language.as_deref())?;
         if let Some(fallback) = &self.fallback {
             for (index, provider) in fallback.iter().enumerate() {
                 if *provider == self.provider || fallback[..index].contains(provider) {
-                    return Err(format!(
-                        "fallback не може містити сам провайдер ({}) чи повтори",
-                        self.provider.id()
+                    let id = self.provider.id();
+                    return Err(tr!(
+                        format!("fallback cannot contain the provider itself ({id}) or repeats"),
+                        format!("fallback не може містити сам провайдер ({id}) чи повтори")
                     ));
                 }
             }
@@ -153,7 +168,7 @@ impl Config {
             |name| std::env::var(name).ok(),
             home,
         );
-        Some(key.and_then(|key| key.ok_or_else(|| MISSING_DEEPL_KEY.into())))
+        Some(key.and_then(|key| key.ok_or_else(missing_deepl_key)))
     }
 
     /// Явна мова з налаштувань або мова системи, яку повертає `detect`.
@@ -161,7 +176,7 @@ impl Config {
         match explicit_target(self.target_language.as_deref()) {
             Ok(Some(code)) => TargetLanguage {
                 code,
-                origin: "налаштування target_language".into(),
+                origin: tr!("target_language setting", "налаштування target_language").into(),
             },
             _ => detect(),
         }
@@ -177,14 +192,33 @@ fn validate_email(email: Option<&str>) -> Result<(), String> {
                     .split_once('@')
                     .is_some_and(|(user, domain)| !user.is_empty() && domain.contains('.')) =>
         {
-            Err("mymemory_email має бути адресою пошти, наприклад name@example.com".into())
+            Err(tr!(
+                "mymemory_email must be an email address such as name@example.com",
+                "mymemory_email має бути адресою пошти, наприклад name@example.com"
+            )
+            .into())
         }
         _ => Ok(()),
     }
 }
 
-const TARGET_ERROR: &str =
-    "target_language має бути кодом мови, наприклад uk, en або zh-Hans; auto або відсутнє поле — мова системи";
+fn target_error() -> String {
+    tr!(
+        "target_language must be a language code such as uk, en, or zh-Hans; auto or no field means the system language",
+        "target_language має бути кодом мови, наприклад uk, en або zh-Hans; auto або відсутнє поле — мова системи"
+    )
+    .into()
+}
+
+/// Цільова мова із сирих налаштувань, ще до їх повної перевірки: за нею вибирається мова
+/// повідомлень, щоб і помилки налаштувань були зрозумілі користувачу.
+pub fn requested_target(options: Option<&serde_json::Value>) -> String {
+    options
+        .and_then(|options| options.get("target_language"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|target| explicit_target(Some(target)).ok().flatten())
+        .unwrap_or_else(|| locale::system_language().code)
+}
 
 /// Явна цільова мова; `None` означає, що її треба взяти із системної локалі.
 fn explicit_target(value: Option<&str>) -> Result<Option<String>, String> {
@@ -193,7 +227,7 @@ fn explicit_target(value: Option<&str>) -> Result<Option<String>, String> {
         Some(tag) if tag.eq_ignore_ascii_case("auto") => Ok(None),
         Some(tag) => locale::normalize_tag(tag)
             .map(Some)
-            .ok_or_else(|| TARGET_ERROR.into()),
+            .ok_or_else(target_error),
     }
 }
 
@@ -215,7 +249,7 @@ struct ProviderEngine {
 impl ProviderEngine {
     fn new(deepl_key: Option<Result<String, String>>) -> Self {
         Self {
-            deepl_key: deepl_key.unwrap_or_else(|| Err(MISSING_DEEPL_KEY.into())),
+            deepl_key: deepl_key.unwrap_or_else(|| Err(missing_deepl_key())),
             paused_until: std::sync::Mutex::default(),
         }
     }
@@ -296,7 +330,14 @@ impl Engine for ProviderEngine {
                     }
                     if let Some(next) = next {
                         // Stderr потрапляє в журнал мовного сервера Zed; stdout зайнятий протоколом LSP.
-                        eprintln!("{error} Переклад через {}.", next.name());
+                        let next = next.name();
+                        eprintln!(
+                            "{}",
+                            tr!(
+                                format!("{error} Translating with {next}."),
+                                format!("{error} Переклад через {next}.")
+                            )
+                        );
                     }
                     errors.push(error);
                 }
@@ -335,7 +376,11 @@ impl Translator {
     /// Перекладає прозу коментаря; блоки коду повертаються без змін і не надсилаються перекладачу.
     pub async fn translate(&self, text: &str) -> Result<String, String> {
         if text.chars().count() > self.config.max_comment_chars {
-            return Err("Коментар перевищує max_comment_chars; переклад не запитувався".into());
+            return Err(tr!(
+                "The comment exceeds max_comment_chars; no translation was requested",
+                "Коментар перевищує max_comment_chars; переклад не запитувався"
+            )
+            .into());
         }
         let operation = async {
             let _guard = self.gate.lock().await;
@@ -360,7 +405,13 @@ impl Translator {
         };
         timeout(Duration::from_secs(self.config.timeout_seconds), operation)
             .await
-            .map_err(|_| format!("Час очікування {} минув", self.config.provider.name()))?
+            .map_err(|_| {
+                let name = self.config.provider.name();
+                tr!(
+                    format!("{name} timed out"),
+                    format!("Час очікування {name} минув")
+                )
+            })?
     }
 
     // Кожен шматок прози кешується окремо: однаковий абзац не перекладається вдруге.
@@ -414,12 +465,20 @@ struct DiagnosticRequest {
 }
 
 pub async fn diagnose(input: &str) -> Result<serde_json::Value, String> {
-    let request: DiagnosticRequest = serde_json::from_str(input)
-        .map_err(|_| "Некоректний запит JSON: перевірте text, provider та timeout_seconds")?;
+    let request: DiagnosticRequest = serde_json::from_str(input).map_err(|_| {
+        tr!(
+            "Invalid JSON request: check text, provider, and timeout_seconds",
+            "Некоректний запит JSON: перевірте text, provider та timeout_seconds"
+        )
+    })?;
     let provider = request.provider.unwrap_or_default();
     let seconds = request.timeout_seconds.unwrap_or(60);
     if !(1..=300).contains(&seconds) {
-        return Err("timeout_seconds має бути в межах 1–300".into());
+        return Err(tr!(
+            "timeout_seconds must be between 1 and 300",
+            "timeout_seconds має бути в межах 1–300"
+        )
+        .into());
     }
     let target = explicit_target(request.target_language.as_deref())?
         .unwrap_or_else(|| locale::system_language().code);
@@ -433,7 +492,7 @@ pub async fn diagnose(input: &str) -> Result<serde_json::Value, String> {
             |name| std::env::var(name).ok(),
             home,
         )?
-        .ok_or_else(|| MISSING_DEEPL_KEY.into())
+        .ok_or_else(missing_deepl_key)
     };
     match request.operation.as_deref() {
         // Для DeepL перевірка справжня: запит використання квоти перевіряє і ключ.
@@ -452,17 +511,31 @@ pub async fn diagnose(input: &str) -> Result<serde_json::Value, String> {
             )
         }
         None | Some("translate") => {}
-        _ => return Err("Невідома операція перекладу".into()),
+        _ => {
+            return Err(tr!(
+                "Unknown translation operation",
+                "Невідома операція перекладу"
+            )
+            .into())
+        }
     }
-    let text = request
-        .text
-        .ok_or("Некоректний запит JSON: очікується поле text")?;
+    let text = request.text.ok_or_else(|| {
+        tr!(
+            "Invalid JSON request: expected a text field",
+            "Некоректний запит JSON: очікується поле text"
+        )
+        .to_owned()
+    })?;
     if text.trim().is_empty() {
-        return Err("Немає тексту для перекладу".into());
+        return Err(tr!("No text to translate", "Немає тексту для перекладу").into());
     }
     let source = request.source_language.unwrap_or_else(|| "auto".into());
     if source.trim().is_empty() {
-        return Err("source_language не може бути порожнім".into());
+        return Err(tr!(
+            "source_language cannot be empty",
+            "source_language не може бути порожнім"
+        )
+        .into());
     }
     if same_language(&source, &target) {
         return Ok(
@@ -642,7 +715,7 @@ mod tests {
             .translate("Return value")
             .await
             .unwrap_err()
-            .contains("Час очікування"));
+            .contains("timed out"));
         assert_eq!(engine.calls.load(Ordering::Relaxed), 1);
     }
     #[tokio::test]
@@ -735,6 +808,15 @@ mod tests {
             };
             assert!(config.validate().unwrap_err().contains("target_language"));
         }
+    }
+
+    #[test]
+    fn interface_language_comes_from_raw_settings_before_validation() {
+        let options = json!({"target_language":"UK_ua", "fallback":"bing"});
+        assert_eq!(requested_target(Some(&options)), "uk-UA");
+        // Без явної мови береться системна; вона завжди непорожня.
+        assert!(!requested_target(Some(&json!({"target_language":"???"}))).is_empty());
+        assert!(!requested_target(None).is_empty());
     }
 
     #[test]
@@ -908,7 +990,7 @@ mod tests {
             fallback: Some(Vec::new()),
             ..Config::default()
         };
-        let error = ProviderEngine::new(Some(Err(MISSING_DEEPL_KEY.into())))
+        let error = ProviderEngine::new(Some(Err(missing_deepl_key())))
             .translate("Hello", &config, "uk")
             .await
             .unwrap_err();

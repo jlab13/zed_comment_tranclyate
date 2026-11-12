@@ -94,7 +94,7 @@ Google works without API keys, but it needs internet access and sends
 the comment text to Google. It uses the web endpoint
 `https://translate.googleapis.com/translate_a/single` with `client=gtx`, not the paid Cloud
 Translation API. This web interface may change or rate-limit requests.
-HTTP 403/429, network errors, and malformed JSON are shown in the hover in Ukrainian.
+HTTP 403/429, network errors, and malformed JSON are shown in the hover.
 Caching and joining lines into paragraphs work for every provider.
 
 Checking Google from the CLI:
@@ -229,7 +229,9 @@ The locale region does not affect translation (`uk_UA.UTF-8` → `uk`), but Chin
 script: `zh_TW` → `zh-Hant`, `zh_CN` → `zh-Hans`. The selected language and its source are
 written to the language server log (in Zed's command palette: `open language server logs`).
 After changing `target_language` or the system language, restart the language servers or Zed.
-The hover header shows the language code: `Переклад → uk`. Error messages stay in Ukrainian.
+The hover header shows the language code: `Translation → de`. The interface — the hover header,
+error messages, the language server log, and CLI errors — is in English, and in Ukrainian when the
+target language is Ukrainian (`Переклад → uk`).
 
 ## Connecting to Zed
 

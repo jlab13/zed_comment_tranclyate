@@ -16,7 +16,8 @@ impl TargetLanguage {
     pub fn fallback() -> Self {
         Self {
             code: FALLBACK_LANGUAGE.into(),
-            origin: "системну мову не визначено".into(),
+            origin: crate::i18n::tr!("system language not detected", "системну мову не визначено")
+                .into(),
         }
     }
 }

@@ -1,3 +1,4 @@
+use crate::i18n::tr;
 use crate::locale;
 use reqwest::{header, Client, Url};
 use serde_json::Value;
@@ -6,13 +7,23 @@ use std::{sync::OnceLock, time::Duration};
 const ENDPOINT: &str = "https://translate.googleapis.com/translate_a/single";
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/70.0.3538.102 Safari/537.36";
 static CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
-const RATE_LIMITED: &str =
-    "Google Translate обмежив кількість запитів (HTTP 429). Спробуйте пізніше.";
-const REJECTED: &str = "Google Translate відхилив запит (HTTP 403).";
+fn rate_limited() -> &'static str {
+    tr!(
+        "Google Translate is rate-limiting requests (HTTP 429). Try again later.",
+        "Google Translate обмежив кількість запитів (HTTP 429). Спробуйте пізніше."
+    )
+}
+
+fn rejected() -> &'static str {
+    tr!(
+        "Google Translate rejected the request (HTTP 403).",
+        "Google Translate відхилив запит (HTTP 403)."
+    )
+}
 
 /// Google обмежив або відхилив запити: варто якийсь час до нього не звертатися.
 pub fn throttled(error: &str) -> bool {
-    error == RATE_LIMITED || error == REJECTED
+    error == rate_limited() || error == rejected()
 }
 
 #[derive(Debug)]
@@ -24,17 +35,20 @@ pub struct Translation {
 fn client() -> Result<&'static Client, String> {
     CLIENT
         .get_or_init(|| {
-            Client::builder()
-                .referer(false)
-                .build()
-                .map_err(|_| "Не вдалося створити HTTP-клієнт Google Translate".into())
+            Client::builder().referer(false).build().map_err(|_| {
+                tr!(
+                    "Could not create the Google Translate HTTP client",
+                    "Не вдалося створити HTTP-клієнт Google Translate"
+                )
+                .into()
+            })
         })
         .as_ref()
         .map_err(Clone::clone)
 }
 
 fn url(text: &str, source: &str, target: &str) -> Url {
-    let mut url = Url::parse(ENDPOINT).expect("Некоректна вбудована адреса Google");
+    let mut url = Url::parse(ENDPOINT).expect("Invalid built-in Google URL");
     let target = locale::web_language(target);
     // form_urlencoded зберігає буквальні +, &, # та Unicode у тексті коментаря.
     url.query_pairs_mut().extend_pairs([
@@ -52,12 +66,21 @@ fn url(text: &str, source: &str, target: &str) -> Url {
 fn decode(body: &[u8], status: u16, source: &str) -> Result<Translation, String> {
     if !(200..300).contains(&status) {
         return Err(match status {
-            429 => RATE_LIMITED.into(),
-            403 => REJECTED.into(),
-            _ => format!("Google Translate повернув HTTP {status}."),
+            429 => rate_limited().into(),
+            403 => rejected().into(),
+            _ => tr!(
+                format!("Google Translate returned HTTP {status}."),
+                format!("Google Translate повернув HTTP {status}.")
+            ),
         });
     }
-    let invalid = || "Некоректна відповідь Google Translate.".to_owned();
+    let invalid = || {
+        tr!(
+            "Invalid response from Google Translate.",
+            "Некоректна відповідь Google Translate."
+        )
+        .to_owned()
+    };
     let root: Value = serde_json::from_slice(body).map_err(|_| invalid())?;
     let sentences = root
         .get(0)
@@ -76,7 +99,11 @@ fn decode(body: &[u8], status: u16, source: &str) -> Result<Translation, String>
         translated.push_str(first.as_str().ok_or_else(invalid)?);
     }
     if translated.trim().is_empty() {
-        return Err("Google Translate повернув порожній переклад.".into());
+        return Err(tr!(
+            "Google Translate returned an empty translation.",
+            "Google Translate повернув порожній переклад."
+        )
+        .into());
     }
     Ok(Translation {
         translation: translated,
@@ -117,7 +144,7 @@ async fn translate_at(
     };
     tokio::time::timeout(deadline, operation)
         .await
-        .map_err(|_| "Час очікування Google Translate минув.".to_owned())?
+        .map_err(|_| timed_out().to_owned())?
 }
 
 fn request(client: &Client, url: Url, deadline: Duration) -> reqwest::RequestBuilder {
@@ -131,10 +158,21 @@ fn request(client: &Client, url: Url, deadline: Duration) -> reqwest::RequestBui
 fn network_error(error: reqwest::Error) -> String {
     // Не додаємо URL або сирий текст помилки: вони можуть містити коментар.
     if error.is_timeout() {
-        "Час очікування Google Translate минув.".into()
+        timed_out().into()
     } else {
-        "Не вдалося з’єднатися з Google Translate. Перевірте мережу.".into()
+        tr!(
+            "Could not connect to Google Translate. Check the network.",
+            "Не вдалося з’єднатися з Google Translate. Перевірте мережу."
+        )
+        .into()
     }
+}
+
+fn timed_out() -> &'static str {
+    tr!(
+        "Google Translate timed out.",
+        "Час очікування Google Translate минув."
+    )
 }
 
 #[cfg(test)]
@@ -299,7 +337,7 @@ mod tests {
             .await
             .err()
             .unwrap();
-        assert!(error.contains("Час очікування"));
+        assert!(error.contains("timed out"));
         thread.join().unwrap();
 
         let (url, thread, started) = server(200, "[]", Duration::from_millis(100));

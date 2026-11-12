@@ -1,6 +1,7 @@
 // Переклад через офіційний API DeepL (DeepL SE). Потрібен власний ключ; план Free має
 // місячну квоту символів. Ключ передається лише в заголовку, ніколи в адресі.
 
+use crate::i18n::tr;
 use reqwest::{header, Client, RequestBuilder};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::OnceLock, time::Duration};
@@ -12,18 +13,49 @@ const USER_AGENT: &str = concat!("comment-translate-lsp/", env!("CARGO_PKG_VERSI
 pub const KEY_VARIABLE: &str = "DEEPL_AUTH_KEY";
 static CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
 
-const KEY_REJECTED: &str =
-    "DeepL відхилив ключ (HTTP 403). Перевірте deepl_key_file або DEEPL_AUTH_KEY.";
-const RATE_LIMITED: &str = "DeepL обмежив кількість запитів (HTTP 429).";
-const QUOTA: &str = "Ліміт символів DeepL на цей місяць вичерпано (HTTP 456).";
+fn key_rejected() -> &'static str {
+    tr!(
+        "DeepL rejected the key (HTTP 403). Check deepl_key_file or DEEPL_AUTH_KEY.",
+        "DeepL відхилив ключ (HTTP 403). Перевірте deepl_key_file або DEEPL_AUTH_KEY."
+    )
+}
+
+fn rate_limited() -> &'static str {
+    tr!(
+        "DeepL is rate-limiting requests (HTTP 429).",
+        "DeepL обмежив кількість запитів (HTTP 429)."
+    )
+}
+
+fn quota() -> &'static str {
+    tr!(
+        "The DeepL character quota for this month is used up (HTTP 456).",
+        "Ліміт символів DeepL на цей місяць вичерпано (HTTP 456)."
+    )
+}
+
+fn timed_out() -> &'static str {
+    tr!("DeepL timed out.", "Час очікування DeepL минув.")
+}
+
+fn invalid() -> String {
+    tr!(
+        "Invalid response from DeepL.",
+        "Некоректна відповідь DeepL."
+    )
+    .to_owned()
+}
 
 fn client() -> Result<&'static Client, String> {
     CLIENT
         .get_or_init(|| {
-            Client::builder()
-                .referer(false)
-                .build()
-                .map_err(|_| "Не вдалося створити HTTP-клієнт DeepL".into())
+            Client::builder().referer(false).build().map_err(|_| {
+                tr!(
+                    "Could not create the DeepL HTTP client",
+                    "Не вдалося створити HTTP-клієнт DeepL"
+                )
+                .into()
+            })
         })
         .as_ref()
         .map_err(Clone::clone)
@@ -31,7 +63,7 @@ fn client() -> Result<&'static Client, String> {
 
 /// DeepL обмежив запити, вичерпав квоту або відхилив ключ: варто якийсь час його пропускати.
 pub fn throttled(error: &str) -> bool {
-    error == RATE_LIMITED || error == QUOTA || error == KEY_REJECTED
+    error == rate_limited() || error == quota() || error == key_rejected()
 }
 
 /// Читає ключ із файлу, а без файлу — зі змінної `DEEPL_AUTH_KEY`. `Ok(None)` — ключа немає.
@@ -50,11 +82,18 @@ pub fn load_key(
             || file.to_owned(),
             |name| name.to_string_lossy().into_owned(),
         );
-        let key = std::fs::read_to_string(&path)
-            .map_err(|_| format!("Не вдалося прочитати deepl_key_file ({name})."))?;
+        let key = std::fs::read_to_string(&path).map_err(|_| {
+            tr!(
+                format!("Could not read deepl_key_file ({name})."),
+                format!("Не вдалося прочитати deepl_key_file ({name}).")
+            )
+        })?;
         let key = key.trim();
         if key.is_empty() {
-            return Err(format!("deepl_key_file ({name}) порожній."));
+            return Err(tr!(
+                format!("deepl_key_file ({name}) is empty."),
+                format!("deepl_key_file ({name}) порожній.")
+            ));
         }
         return Ok(Some(key.to_owned()));
     }
@@ -187,17 +226,27 @@ async fn send(request: RequestBuilder, deadline: Duration) -> Result<(u16, Vec<u
     };
     tokio::time::timeout(deadline, operation)
         .await
-        .map_err(|_| "Час очікування DeepL минув.".to_owned())?
+        .map_err(|_| timed_out().to_owned())?
 }
 
 fn status_error(status: u16) -> String {
     match status {
-        400 => "DeepL не підтримує цю мовну пару або відхилив запит (HTTP 400).".into(),
-        401 | 403 => KEY_REJECTED.into(),
-        429 => RATE_LIMITED.into(),
-        456 => QUOTA.into(),
-        500.. => format!("DeepL тимчасово недоступний (HTTP {status})."),
-        _ => format!("DeepL повернув HTTP {status}."),
+        400 => tr!(
+            "DeepL does not support this language pair or rejected the request (HTTP 400).",
+            "DeepL не підтримує цю мовну пару або відхилив запит (HTTP 400)."
+        )
+        .into(),
+        401 | 403 => key_rejected().into(),
+        429 => rate_limited().into(),
+        456 => quota().into(),
+        500.. => tr!(
+            format!("DeepL is temporarily unavailable (HTTP {status})."),
+            format!("DeepL тимчасово недоступний (HTTP {status}).")
+        ),
+        _ => tr!(
+            format!("DeepL returned HTTP {status}."),
+            format!("DeepL повернув HTTP {status}.")
+        ),
     }
 }
 
@@ -215,15 +264,18 @@ fn decode_translation(body: &[u8], status: u16) -> Result<String, String> {
     if !(200..300).contains(&status) {
         return Err(status_error(status));
     }
-    let reply: TranslateReply =
-        serde_json::from_slice(body).map_err(|_| "Некоректна відповідь DeepL.".to_owned())?;
+    let reply: TranslateReply = serde_json::from_slice(body).map_err(|_| invalid())?;
     let text: String = reply
         .translations
         .into_iter()
         .map(|translation| translation.text)
         .collect();
     if text.trim().is_empty() {
-        return Err("DeepL повернув порожній переклад.".into());
+        return Err(tr!(
+            "DeepL returned an empty translation.",
+            "DeepL повернув порожній переклад."
+        )
+        .into());
     }
     Ok(text)
 }
@@ -238,8 +290,7 @@ fn decode_usage(body: &[u8], status: u16) -> Result<Usage, String> {
     if !(200..300).contains(&status) {
         return Err(status_error(status));
     }
-    let reply: UsageReply =
-        serde_json::from_slice(body).map_err(|_| "Некоректна відповідь DeepL.".to_owned())?;
+    let reply: UsageReply = serde_json::from_slice(body).map_err(|_| invalid())?;
     Ok(Usage {
         used: reply.character_count,
         limit: reply.character_limit,
@@ -249,9 +300,13 @@ fn decode_usage(body: &[u8], status: u16) -> Result<Usage, String> {
 fn network_error(error: reqwest::Error) -> String {
     // Не додаємо сирий текст помилки: він може містити адресу запиту.
     if error.is_timeout() {
-        "Час очікування DeepL минув.".into()
+        timed_out().into()
     } else {
-        "Не вдалося з’єднатися з DeepL. Перевірте мережу.".into()
+        tr!(
+            "Could not connect to DeepL. Check the network.",
+            "Не вдалося з’єднатися з DeepL. Перевірте мережу."
+        )
+        .into()
     }
 }
 
@@ -337,7 +392,7 @@ mod tests {
         assert_eq!((usage.used, usage.limit), (1200, 500000));
         for (status, expected) in [
             (400, "400"),
-            (403, "ключ"),
+            (403, "key"),
             (429, "429"),
             (456, "456"),
             (503, "503"),
@@ -389,7 +444,7 @@ mod tests {
         std::fs::write(&file, "\n").unwrap();
         assert!(load_key(file.to_str(), variable, None)
             .unwrap_err()
-            .contains("порожній"));
+            .contains("empty"));
         let missing = load_key(Some("/nonexistent/secret-dir/deepl.key"), variable, None);
         let error = missing.unwrap_err();
         assert!(error.contains("deepl.key") && !error.contains("secret-dir"));

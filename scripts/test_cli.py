@@ -32,8 +32,12 @@ class CliTests(unittest.TestCase):
         self.assertNotEqual(status, 0)
         self.assertIn("text", body["error"])
 
-    def test_rejects_empty_text(self):
-        status, body = self.invoke(json.dumps({"text": " \n "}))
+    def test_rejects_empty_text_in_the_target_language(self):
+        status, body = self.invoke(json.dumps({"text": " \n ", "target_language": "en"}))
+        self.assertNotEqual(status, 0)
+        self.assertIn("No text to translate", body["error"])
+        # Для цільової української повідомлення українською.
+        status, body = self.invoke(json.dumps({"text": " \n ", "target_language": "uk"}))
         self.assertNotEqual(status, 0)
         self.assertIn("Немає тексту", body["error"])
 

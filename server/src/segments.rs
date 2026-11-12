@@ -106,7 +106,7 @@ pub fn split<'a>(text: &'a str) -> Vec<Segment<'a>> {
 // Мітка виклику функції зберігає дужки: без них DeepL читає «Call x0_» як «зателефонуйте
 // за номером», а «Call x0_()» — як виклик. Дужки, які перекладач відкинув, не заважають.
 static LABEL: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"[xX]([0-9]+)_(?:\(\))?").expect("Некоректний вираз для міток"));
+    LazyLock::new(|| Regex::new(r"[xX]([0-9]+)_(?:\(\))?").expect("Invalid label pattern"));
 
 fn label(index: usize, code: &str) -> String {
     let call = code.trim_matches('`').ends_with(')');
@@ -130,7 +130,7 @@ static CODE: LazyLock<Regex> = LazyLock::new(|| {
               (?: \( [^()\n]{0,60} \) )? )
         ",
     )
-    .expect("Некоректний вираз для пошуку коду")
+    .expect("Invalid code pattern")
 });
 
 /// Текст, у якому код замінено мітками `x0_`, `x1_`…

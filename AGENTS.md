@@ -4,6 +4,7 @@
 
 - Always communicate with the user in Ukrainian.
 - Write code comments, including documentation comments, in Ukrainian.
+- Write user-facing server text (hover, errors, logs, CLI) in English with a Ukrainian variant through `i18n::tr!`; Ukrainian is shown only when the target language is `uk`.
 - Write commit messages in English.
 
 ## Project Structure & Module Organization

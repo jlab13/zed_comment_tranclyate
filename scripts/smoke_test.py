@@ -215,5 +215,47 @@ def main():
         process.stdout.close()
 
 
+def check_english_interface(binary):
+    """Для цільової мови, відмінної від української, інтерфейс англійською."""
+    process = subprocess.Popen([str(binary)], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    messages = queue.Queue()
+    threading.Thread(target=read_messages, args=(process.stdout, messages), daemon=True).start()
+    try:
+        def send(message_id, method, params):
+            message = {"jsonrpc": "2.0", "method": method, "params": params}
+            if message_id is not None:
+                message["id"] = message_id
+            payload = json.dumps(message).encode()
+            process.stdin.write(f"Content-Length: {len(payload)}\r\n\r\n".encode() + payload)
+            process.stdin.flush()
+            while message_id is not None:
+                response = messages.get(timeout=10)
+                if isinstance(response, Exception):
+                    raise response
+                if response.get("id") == message_id:
+                    return response.get("result")
+
+        uri = "file:///tmp/comment-translate-smoke-en.c"
+        send(1, "initialize", {"processId": None, "capabilities": {},
+                               "initializationOptions": {"source_language": "en", "target_language": "en"}})
+        send(None, "initialized", {})
+        send(None, "textDocument/didOpen", {"textDocument": {
+            "uri": uri, "languageId": "c", "version": 1, "text": "// Return the value.\n"}})
+        result = send(2, "textDocument/hover", {"textDocument": {"uri": uri},
+                                                "position": {"line": 0, "character": 4}})
+        assert result["contents"]["value"] == "Translation → en\n\nReturn the value.", result
+        send(3, "shutdown", None)
+        send(None, "exit", None)
+        assert process.wait(timeout=5) == 0
+        print("LSP smoke test: OK — English interface for a non-Ukrainian target")
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        process.stdin.close()
+        process.stdout.close()
+
+
 if __name__ == "__main__":
     main()
+    check_english_interface(Path(sys.argv[1] if len(sys.argv) > 1 else "target/debug/comment-translate-lsp").resolve())

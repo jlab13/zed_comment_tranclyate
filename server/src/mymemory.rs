@@ -1,5 +1,6 @@
 // Переклад через публічний API MyMemory (Translated S.r.l.): без ключа, з денним лімітом.
 
+use crate::i18n::tr;
 use crate::locale;
 use reqwest::{header, Client, Url};
 use serde::Deserialize;
@@ -15,10 +16,13 @@ static CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
 fn client() -> Result<&'static Client, String> {
     CLIENT
         .get_or_init(|| {
-            Client::builder()
-                .referer(false)
-                .build()
-                .map_err(|_| "Не вдалося створити HTTP-клієнт MyMemory".into())
+            Client::builder().referer(false).build().map_err(|_| {
+                tr!(
+                    "Could not create the MyMemory HTTP client",
+                    "Не вдалося створити HTTP-клієнт MyMemory"
+                )
+                .into()
+            })
         })
         .as_ref()
         .map_err(Clone::clone)
@@ -50,11 +54,11 @@ pub async fn translate(
     };
     tokio::time::timeout(deadline, operation)
         .await
-        .map_err(|_| "Час очікування MyMemory минув.".to_owned())?
+        .map_err(|_| timed_out().to_owned())?
 }
 
 fn url(text: &str, source: &str, target: &str, email: Option<&str>) -> Url {
-    let mut url = Url::parse(ENDPOINT).expect("Некоректна вбудована адреса MyMemory");
+    let mut url = Url::parse(ENDPOINT).expect("Invalid built-in MyMemory URL");
     let source = if source.eq_ignore_ascii_case("auto") {
         "autodetect".to_owned()
     } else {
@@ -103,28 +107,52 @@ struct Data {
     text: Option<String>,
 }
 
-const QUOTA: &str = "Денний ліміт MyMemory вичерпано. Задайте mymemory_email, щоб збільшити ліміт.";
-const RATE_LIMITED: &str = "MyMemory обмежив кількість запитів (HTTP 429).";
+fn quota() -> &'static str {
+    tr!(
+        "The MyMemory daily quota is used up. Set mymemory_email to raise it.",
+        "Денний ліміт MyMemory вичерпано. Задайте mymemory_email, щоб збільшити ліміт."
+    )
+}
+
+fn rate_limited() -> &'static str {
+    tr!(
+        "MyMemory is rate-limiting requests (HTTP 429).",
+        "MyMemory обмежив кількість запитів (HTTP 429)."
+    )
+}
+
+fn timed_out() -> &'static str {
+    tr!("MyMemory timed out.", "Час очікування MyMemory минув.")
+}
 
 /// MyMemory обмежив запити або вичерпав денний ліміт: варто якийсь час його пропускати.
 pub fn throttled(error: &str) -> bool {
-    error == RATE_LIMITED || error == QUOTA
+    error == rate_limited() || error == quota()
 }
 
 fn decode(body: &[u8], status: u16) -> Result<String, String> {
     if status == 429 {
-        return Err(RATE_LIMITED.into());
+        return Err(rate_limited().into());
     }
-    let invalid = || "Некоректна відповідь MyMemory.".to_owned();
+    let invalid = || {
+        tr!(
+            "Invalid response from MyMemory.",
+            "Некоректна відповідь MyMemory."
+        )
+        .to_owned()
+    };
     let reply: Reply = match serde_json::from_slice(body) {
         Ok(reply) => reply,
         Err(_) if !(200..300).contains(&status) => {
-            return Err(format!("MyMemory повернув HTTP {status}."))
+            return Err(tr!(
+                format!("MyMemory returned HTTP {status}."),
+                format!("MyMemory повернув HTTP {status}.")
+            ))
         }
         Err(_) => return Err(invalid()),
     };
     if reply.quota_finished == Some(true) {
-        return Err(QUOTA.into());
+        return Err(quota().into());
     }
     // Статус приходить числом або рядком.
     let code = reply.status.as_ref().and_then(|value| {
@@ -140,11 +168,17 @@ fn decode(body: &[u8], status: u16) -> Result<String, String> {
             .filter(|details| !details.trim().is_empty())
             .map(|details| details.chars().take(200).collect::<String>());
         return Err(match details {
-            Some(details) => format!("MyMemory відхилив запит: {details}"),
-            None => format!(
-                "MyMemory повернув статус {}.",
-                code.unwrap_or(u64::from(status))
+            Some(details) => tr!(
+                format!("MyMemory rejected the request: {details}"),
+                format!("MyMemory відхилив запит: {details}")
             ),
+            None => {
+                let code = code.unwrap_or(u64::from(status));
+                tr!(
+                    format!("MyMemory returned status {code}."),
+                    format!("MyMemory повернув статус {code}.")
+                )
+            }
         });
     }
     let text = reply.data.and_then(|data| data.text).unwrap_or_default();
@@ -152,10 +186,14 @@ fn decode(body: &[u8], status: u16) -> Result<String, String> {
     if text.contains("MYMEMORY WARNING")
         || text.contains("YOU USED ALL AVAILABLE FREE TRANSLATIONS")
     {
-        return Err(QUOTA.into());
+        return Err(quota().into());
     }
     if text.trim().is_empty() {
-        return Err("MyMemory повернув порожній переклад.".into());
+        return Err(tr!(
+            "MyMemory returned an empty translation.",
+            "MyMemory повернув порожній переклад."
+        )
+        .into());
     }
     Ok(text)
 }
@@ -163,9 +201,13 @@ fn decode(body: &[u8], status: u16) -> Result<String, String> {
 fn network_error(error: reqwest::Error) -> String {
     // Не додаємо URL або сирий текст помилки: вони можуть містити коментар.
     if error.is_timeout() {
-        "Час очікування MyMemory минув.".into()
+        timed_out().into()
     } else {
-        "Не вдалося з’єднатися з MyMemory. Перевірте мережу.".into()
+        tr!(
+            "Could not connect to MyMemory. Check the network.",
+            "Не вдалося з’єднатися з MyMemory. Перевірте мережу."
+        )
+        .into()
     }
 }
 
@@ -246,7 +288,7 @@ mod tests {
             r#"{"responseData":{"translatedText":"x"},"responseStatus":200,"quotaFinished":true}"#;
         assert!(decode(finished.as_bytes(), 200)
             .unwrap_err()
-            .contains("ліміт"));
+            .contains("quota"));
         let long = r#"{"responseData":{"translatedText":"QUERY LENGTH LIMIT EXCEEDED"},"responseStatus":403,"responseDetails":"QUERY LENGTH LIMIT EXCEEDED. MAX ALLOWED QUERY : 500 CHARS"}"#;
         assert!(decode(long.as_bytes(), 200)
             .unwrap_err()
