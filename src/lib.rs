@@ -6,7 +6,7 @@ use zed_extension_api as zed;
 /// Назва виконуваного файлу сервера в PATH, в архіві релізу й у робочому каталозі.
 const SERVER_BINARY: &str = "comment-translate-lsp";
 /// Репозиторій GitHub, з релізів якого завантажується сервер.
-const REPOSITORY: &str = "jlab13/zed_comment_tranclyate";
+const REPOSITORY: &str = "jlab13/zed_comment_translate";
 /// Версія сервера дорівнює версії розширення, тому вони завжди сумісні.
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 

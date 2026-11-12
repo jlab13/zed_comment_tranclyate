@@ -134,7 +134,7 @@ dependencies = [
 
 [[package]]
 name = "comment-translate"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde_json",
  "zed_extension_api",
@@ -142,7 +142,7 @@ dependencies = [
 
 [[package]]
 name = "comment-translate-lsp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "regex",
  "reqwest",
