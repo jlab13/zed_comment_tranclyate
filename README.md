@@ -4,7 +4,8 @@
 
 An extension for **macOS and Linux** that shows a translation of the comment under the cursor
 in Zed's standard hover popup, in the system language (or the language set in `target_language`).
-The default provider on both macOS and Linux is **Google Translate**, which needs no API key.
+The default provider on both macOS and Linux is **Google Translate**, which needs no API key;
+when Google does not answer, it falls back to **MyMemory**.
 **Apple Translation** is available on macOS 26+ through configuration.
 Supports **C, C++, Rust, Python, Shell Script (Bash), Swift, and Dart**: line, block,
 and documentation comments, plus Python docstrings. Tree-sitter tells strings, raw strings,
@@ -23,6 +24,7 @@ interpolation, and heredocs apart from comments. The code in the file is never m
 
 ```text
 Zed → WASM extension → Rust LSP → Google Translate (Rust, all platforms)
+                             ↳ MyMemory (Rust, fallback for Google)
                              → Apple Translation (Swift, macOS only)
 ```
 
@@ -32,6 +34,7 @@ Zed → WASM extension → Rust LSP → Google Translate (Rust, all platforms)
 - `server/src/segments.rs` — code protection: splitting into prose and code blocks, labels for inline code.
 - `server/src/locale.rs` — resolves the target language from the system locale.
 - `server/src/google.rs` — the shared Google HTTP client built on reqwest/rustls.
+- `server/src/mymemory.rs` — the MyMemory client: request chunking, quota and error handling.
 - `native/` — the Swift Apple translator, strategy selection, and the C-compatible bridge.
 - `server/build.rs` — links Swift only on macOS with the `apple` feature.
 - `examples/` — Zed settings, a key binding, and demo files with English comments for every supported language.
@@ -48,7 +51,8 @@ The target language comes from the system locale or from `target_language` (see
 If the source language matches the target language, the text is returned unchanged.
 On macOS 26.4+, Apple checks `highFidelity` first and then `lowLatency`; translation runs
 locally. Google uses the portable Rust reqwest HTTP client with rustls TLS and needs internet access.
-Providers never switch automatically on failure.
+Apple never switches to another provider. Google falls back to MyMemory unless
+`"fallback": "none"` is set (see [MyMemory](#mymemory)).
 Up to 256 successful results are cached in memory; when the cache is full, it is cleared.
 
 ## Building
@@ -112,7 +116,7 @@ the comment text to Google. It uses the web endpoint
 `https://translate.googleapis.com/translate_a/single` with `client=gtx`, not the paid Cloud
 Translation API. This web interface may change or rate-limit requests.
 HTTP 403/429, network errors, and malformed JSON are shown in the hover in Ukrainian.
-Caching and joining lines into paragraphs work for both providers.
+Caching and joining lines into paragraphs work for every provider.
 
 Checking Google from the CLI:
 
@@ -123,6 +127,48 @@ echo '{"provider":"google","text":"Return the next counter value.","source_langu
 
 `--check en` returns `network_required` for the default Google provider; verify access to Google
 with a real translation through `--translate` with `"provider":"google"`.
+
+### MyMemory
+
+[MyMemory](https://mymemory.translated.net/doc/spec.php) is a free public translation API by
+Translated S.r.l. (Italy). It needs no key and is called openly as
+`comment-translate-lsp/<version>`. It serves as Google's fallback by default: when Google cannot
+be reached, rate-limits requests, or returns an error, the same paragraph goes to MyMemory, and
+the reason is written to the language server log. After HTTP 429 or 403 from Google, the server
+skips Google for 5 minutes and sends requests straight to MyMemory instead of hitting a service
+that is already refusing them. When fallback is enabled, Google gets half of `timeout_seconds`
+and MyMemory the other half. If both fail, the hover shows both reasons. Apple never falls back.
+
+```json
+{
+  "lsp": {
+    "comment-translate": {
+      "initialization_options": {
+        "provider": "google",
+        "fallback": "mymemory",
+        "mymemory_email": "you@example.com"
+      }
+    }
+  }
+}
+```
+
+- `"fallback": "none"` turns fallback off: the comment text is then sent to Google only.
+- `"provider": "mymemory"` uses MyMemory directly, without Google.
+- Without an address, MyMemory allows about 5,000 characters a day; `mymemory_email` raises
+  this to about 50,000. The address is sent to MyMemory with every request; the server never
+  fills it in on its own.
+- MyMemory accepts at most 500 characters per request, so longer text is split at line,
+  sentence, or word boundaries into requests of up to 450 bytes.
+- Translation quality is usually lower than Google's. With fallback enabled, comment text may
+  reach a second third-party service.
+
+Checking MyMemory from the CLI (the CLI tests the selected service only, without fallback):
+
+```sh
+echo '{"provider":"mymemory","text":"Return the next counter value.","source_language":"en"}' \
+  | ./target/release/comment-translate-lsp --translate
+```
 
 ## Translation language
 

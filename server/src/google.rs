@@ -1,3 +1,4 @@
+use crate::locale;
 use reqwest::{header, Client, Url};
 use serde_json::Value;
 use std::{sync::OnceLock, time::Duration};
@@ -5,6 +6,14 @@ use std::{sync::OnceLock, time::Duration};
 const ENDPOINT: &str = "https://translate.googleapis.com/translate_a/single";
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/70.0.3538.102 Safari/537.36";
 static CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
+const RATE_LIMITED: &str =
+    "Google Translate обмежив кількість запитів (HTTP 429). Спробуйте пізніше.";
+const REJECTED: &str = "Google Translate відхилив запит (HTTP 403).";
+
+/// Google обмежив або відхилив запити: варто якийсь час до нього не звертатися.
+pub fn throttled(error: &str) -> bool {
+    error == RATE_LIMITED || error == REJECTED
+}
 
 #[derive(Debug)]
 pub struct Translation {
@@ -24,24 +33,9 @@ fn client() -> Result<&'static Client, String> {
         .map_err(Clone::clone)
 }
 
-/// Код мови у форматі Google: регіон відкидається, крім варіантів, які Google розрізняє.
-fn google_language(tag: &str) -> String {
-    let mut parts = tag.split(['-', '_']);
-    let language = parts.next().unwrap_or(tag).to_ascii_lowercase();
-    let rest: Vec<_> = parts.map(str::to_ascii_lowercase).collect();
-    let has = |value: &str| rest.iter().any(|part| part == value);
-    match language.as_str() {
-        "zh" if has("hant") || has("tw") || has("hk") || has("mo") => "zh-TW".into(),
-        "zh" => "zh-CN".into(),
-        "pt" if has("pt") => "pt-PT".into(),
-        "nb" | "nn" => "no".into(),
-        _ => language,
-    }
-}
-
 fn url(text: &str, source: &str, target: &str) -> Url {
     let mut url = Url::parse(ENDPOINT).expect("Некоректна вбудована адреса Google");
-    let target = google_language(target);
+    let target = locale::web_language(target);
     // form_urlencoded зберігає буквальні +, &, # та Unicode у тексті коментаря.
     url.query_pairs_mut().extend_pairs([
         ("client", "gtx"),
@@ -58,10 +52,8 @@ fn url(text: &str, source: &str, target: &str) -> Url {
 fn decode(body: &[u8], status: u16, source: &str) -> Result<Translation, String> {
     if !(200..300).contains(&status) {
         return Err(match status {
-            429 => {
-                "Google Translate обмежив кількість запитів (HTTP 429). Спробуйте пізніше.".into()
-            }
-            403 => "Google Translate відхилив запит (HTTP 403).".into(),
+            429 => RATE_LIMITED.into(),
+            403 => REJECTED.into(),
             _ => format!("Google Translate повернув HTTP {status}."),
         });
     }
@@ -179,7 +171,7 @@ mod tests {
             ("pt-PT", "pt-PT"),
             ("nb", "no"),
         ] {
-            assert_eq!(google_language(target), expected, "{target}");
+            assert_eq!(locale::web_language(target), expected, "{target}");
             let url = url("Text", "en", target);
             let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
             assert_eq!(query["tl"], expected);

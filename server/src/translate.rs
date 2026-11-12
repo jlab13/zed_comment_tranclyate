@@ -1,11 +1,16 @@
 use crate::google;
 use crate::locale::{self, TargetLanguage};
+use crate::mymemory;
 #[cfg(all(target_os = "macos", feature = "apple"))]
 use crate::native;
 use crate::segments::{self, Segment};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, PoisonError},
+    time::{Duration, Instant},
+};
 use tokio::{sync::Mutex, time::timeout};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -14,6 +19,7 @@ pub enum Provider {
     Apple,
     #[default]
     Google,
+    MyMemory,
 }
 
 impl Provider {
@@ -21,8 +27,25 @@ impl Provider {
         match self {
             Self::Apple => "Apple Translation",
             Self::Google => "Google Translate",
+            Self::MyMemory => "MyMemory",
         }
     }
+
+    fn id(self) -> &'static str {
+        match self {
+            Self::Apple => "apple",
+            Self::Google => "google",
+            Self::MyMemory => "mymemory",
+        }
+    }
+}
+
+/// Запасний рушій, коли Google не відповідає, обмежує запити або повертає помилку.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Fallback {
+    MyMemory,
+    None,
 }
 
 #[derive(Clone, Deserialize)]
@@ -32,6 +55,10 @@ pub struct Config {
     pub source_language: String,
     /// Мова перекладу; відсутнє поле або `auto` означає мову системної локалі.
     pub target_language: Option<String>,
+    /// Запасний рушій для Google; без поля — MyMemory. Apple ніколи не перемикається.
+    pub fallback: Option<Fallback>,
+    /// Адреса для MyMemory: піднімає анонімний денний ліміт.
+    pub mymemory_email: Option<String>,
     pub timeout_seconds: u64,
     pub max_comment_chars: usize,
 }
@@ -42,6 +69,8 @@ impl Default for Config {
             provider: Provider::default(),
             source_language: "auto".into(),
             target_language: None,
+            fallback: None,
+            mymemory_email: None,
             timeout_seconds: 60,
             max_comment_chars: 4000,
         }
@@ -58,12 +87,24 @@ impl Config {
             return Err("source_language має бути auto або кодом мови, наприклад en".into());
         }
         explicit_target(self.target_language.as_deref())?;
+        if self.provider != Provider::Google && self.fallback == Some(Fallback::MyMemory) {
+            return Err(
+                "fallback: mymemory працює лише з provider: google; Apple ніколи не перемикається на онлайн-сервіси"
+                    .into(),
+            );
+        }
+        validate_email(self.mymemory_email.as_deref())?;
         if !(1..=300).contains(&self.timeout_seconds)
             || !(1..=20000).contains(&self.max_comment_chars)
         {
             return Err("timeout_seconds: 1–300; max_comment_chars: 1–20000".into());
         }
         Ok(())
+    }
+
+    /// Google переходить на MyMemory, якщо запасний рушій не вимкнено.
+    fn uses_fallback(&self) -> bool {
+        self.provider == Provider::Google && self.fallback != Some(Fallback::None)
     }
 
     /// Явна мова з налаштувань або мова системи, яку повертає `detect`.
@@ -75,6 +116,21 @@ impl Config {
             },
             _ => detect(),
         }
+    }
+}
+
+fn validate_email(email: Option<&str>) -> Result<(), String> {
+    match email {
+        Some(email)
+            if email.len() > 254
+                || email.chars().any(char::is_whitespace)
+                || !email
+                    .split_once('@')
+                    .is_some_and(|(user, domain)| !user.is_empty() && domain.contains('.')) =>
+        {
+            Err("mymemory_email має бути адресою пошти, наприклад name@example.com".into())
+        }
+        _ => Ok(()),
     }
 }
 
@@ -104,7 +160,59 @@ trait Engine: Send + Sync {
     async fn translate(&self, text: &str, config: &Config, target: &str) -> Result<String, String>;
 }
 
-struct ProviderEngine;
+/// Скільки не звертатися до Google після HTTP 429 чи 403, якщо є запасний рушій.
+const GOOGLE_PAUSE: Duration = Duration::from_secs(300);
+
+#[derive(Default)]
+struct ProviderEngine {
+    // До цього моменту Google пропускається: він уже відмовляє, тож не смикаємо його.
+    google_paused_until: std::sync::Mutex<Option<Instant>>,
+}
+
+impl ProviderEngine {
+    fn google_paused(&self) -> bool {
+        self.google_paused_until
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some_and(|until| Instant::now() < until)
+    }
+
+    fn pause_google(&self) {
+        *self
+            .google_paused_until
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(Instant::now() + GOOGLE_PAUSE);
+    }
+
+    async fn google(&self, text: &str, config: &Config, target: &str) -> Result<String, String> {
+        let source = &config.source_language;
+        let deadline = Duration::from_secs(config.timeout_seconds);
+        if !config.uses_fallback() {
+            return google::translate(text, source, target, deadline)
+                .await
+                .map(|reply| reply.translation);
+        }
+        let email = config.mymemory_email.as_deref();
+        if self.google_paused() {
+            return mymemory::translate(text, source, target, email, deadline).await;
+        }
+        // Половина часу лишається MyMemory, щоб повільний Google не з’їв увесь тайм-аут.
+        let half = deadline / 2;
+        match google::translate(text, source, target, half).await {
+            Ok(reply) => Ok(reply.translation),
+            Err(error) => {
+                if google::throttled(&error) {
+                    self.pause_google();
+                }
+                // Stderr потрапляє в журнал мовного сервера Zed; stdout зайнятий протоколом LSP.
+                eprintln!("{error} Переклад через MyMemory.");
+                mymemory::translate(text, source, target, email, half)
+                    .await
+                    .map_err(|fallback| format!("{error}\nMyMemory: {fallback}"))
+            }
+        }
+    }
+}
 
 #[tower_lsp::async_trait]
 impl Engine for ProviderEngine {
@@ -113,14 +221,17 @@ impl Engine for ProviderEngine {
             return Ok(text.to_owned());
         }
         match config.provider {
-            Provider::Google => google::translate(
-                text,
-                &config.source_language,
-                target,
-                Duration::from_secs(config.timeout_seconds),
-            )
-            .await
-            .map(|reply| reply.translation),
+            Provider::Google => self.google(text, config, target).await,
+            Provider::MyMemory => {
+                mymemory::translate(
+                    text,
+                    &config.source_language,
+                    target,
+                    config.mymemory_email.as_deref(),
+                    Duration::from_secs(config.timeout_seconds),
+                )
+                .await
+            }
             Provider::Apple => {
                 #[cfg(all(target_os = "macos", feature = "apple"))]
                 {
@@ -161,7 +272,7 @@ impl Translator {
         Self {
             config,
             target,
-            engine: Arc::new(ProviderEngine),
+            engine: Arc::new(ProviderEngine::default()),
             cache: Mutex::new(HashMap::new()),
             gate: Mutex::new(()),
         }
@@ -253,6 +364,7 @@ struct DiagnosticRequest {
     text: Option<String>,
     source_language: Option<String>,
     target_language: Option<String>,
+    mymemory_email: Option<String>,
     timeout_seconds: Option<u64>,
 }
 
@@ -285,10 +397,12 @@ pub async fn diagnose(input: &str) -> Result<serde_json::Value, String> {
             return Err(apple_unavailable());
         }
     }
+    validate_email(request.mymemory_email.as_deref())?;
+    let id = provider.id();
     match request.operation.as_deref() {
         Some("check") => {
             return Ok(
-                json!({"provider":"google", "status":"network_required", "target_language":target}),
+                json!({"provider":id, "status":"network_required", "target_language":target}),
             )
         }
         None | Some("translate") => {}
@@ -306,12 +420,21 @@ pub async fn diagnose(input: &str) -> Result<serde_json::Value, String> {
     }
     if same_language(&source, &target) {
         return Ok(
-            json!({"provider":"google", "translation":text, "source_language":source, "target_language":target}),
+            json!({"provider":id, "translation":text, "source_language":source, "target_language":target}),
         );
     }
-    let reply = google::translate(&text, &source, &target, Duration::from_secs(seconds)).await?;
+    let deadline = Duration::from_secs(seconds);
+    // CLI перевіряє саме вибраний сервіс, тому запасний рушій тут не вмикається.
+    let (translation, source) = if provider == Provider::MyMemory {
+        let email = request.mymemory_email.as_deref();
+        let translation = mymemory::translate(&text, &source, &target, email, deadline).await?;
+        (translation, source)
+    } else {
+        let reply = google::translate(&text, &source, &target, deadline).await?;
+        (reply.translation, reply.source_language)
+    };
     Ok(
-        json!({"provider":"google", "translation":reply.translation, "source_language":reply.source_language, "target_language":target}),
+        json!({"provider":id, "translation":translation, "source_language":source, "target_language":target}),
     )
 }
 
@@ -617,7 +740,7 @@ mod tests {
             source_language: "de".into(),
             ..Config::default()
         };
-        let text = ProviderEngine
+        let text = ProviderEngine::default()
             .translate("Der Wert 😀", &config, "de-AT")
             .await
             .unwrap();
@@ -636,6 +759,94 @@ mod tests {
                 .await
                 .unwrap_err()
                 .contains("target_language")
+        );
+    }
+
+    #[test]
+    fn google_falls_back_to_mymemory_unless_disabled() {
+        let config = |json: &str| serde_json::from_str::<Config>(json).unwrap();
+        assert!(config("{}").uses_fallback());
+        assert!(config(r#"{"fallback":"mymemory"}"#).uses_fallback());
+        assert!(!config(r#"{"fallback":"none"}"#).uses_fallback());
+        let direct = config(r#"{"provider":"mymemory"}"#);
+        assert_eq!(direct.provider, Provider::MyMemory);
+        assert!(direct.validate().is_ok());
+        assert!(!direct.uses_fallback());
+        assert!(serde_json::from_str::<Config>(r#"{"fallback":"google"}"#).is_err());
+    }
+
+    #[test]
+    fn only_google_accepts_an_explicit_fallback() {
+        let config = Config {
+            provider: Provider::MyMemory,
+            fallback: Some(Fallback::MyMemory),
+            ..Config::default()
+        };
+        assert!(config.validate().unwrap_err().contains("provider: google"));
+        let config = Config {
+            provider: Provider::MyMemory,
+            fallback: Some(Fallback::None),
+            ..Config::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validates_mymemory_email() {
+        for email in ["dev@example.com", "a.b+c@mail.example.org"] {
+            let config = Config {
+                mymemory_email: Some(email.into()),
+                ..Config::default()
+            };
+            assert!(config.validate().is_ok(), "{email}");
+        }
+        for email in [
+            "",
+            "dev",
+            "dev@localhost",
+            "@example.com",
+            "a b@example.com",
+        ] {
+            let config = Config {
+                mymemory_email: Some(email.into()),
+                ..Config::default()
+            };
+            assert!(
+                config.validate().unwrap_err().contains("mymemory_email"),
+                "{email}"
+            );
+        }
+    }
+
+    #[test]
+    fn google_is_paused_after_a_rate_limit() {
+        let engine = ProviderEngine::default();
+        assert!(!engine.google_paused());
+        engine.pause_google();
+        assert!(engine.google_paused());
+        *engine.google_paused_until.lock().unwrap() = Some(Instant::now());
+        assert!(!engine.google_paused());
+    }
+
+    #[tokio::test]
+    async fn mymemory_diagnostics_work_without_network() {
+        let value =
+            diagnose(r#"{"provider":"mymemory","operation":"check","target_language":"uk"}"#)
+                .await
+                .unwrap();
+        assert_eq!(value["provider"], "mymemory");
+        assert_eq!(value["status"], "network_required");
+        let value = diagnose(
+            r#"{"provider":"mymemory","text":"Текст","source_language":"uk","target_language":"uk"}"#,
+        )
+        .await
+        .unwrap();
+        assert_eq!(value["translation"], "Текст");
+        assert!(
+            diagnose(r#"{"provider":"mymemory","text":"Hi","mymemory_email":"nope"}"#)
+                .await
+                .unwrap_err()
+                .contains("mymemory_email")
         );
     }
 }

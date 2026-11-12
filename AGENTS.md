@@ -8,9 +8,9 @@
 
 ## Project Structure & Module Organization
 
-This Cargo workspace contains the Zed WASM extension in `src/lib.rs` and the native LSP in `server/src/`. `extension.toml` registers C, C++, Rust, Python, Shell Script, Swift, and Dart; `server/src/languages.rs` describes each language. Tree-sitter identifies comments. `server/src/locale.rs` resolves the target language from `target_language` or the system locale. `server/src/segments.rs` keeps code blocks and inline code out of translation. `server/src/google.rs` implements portable Google HTTP translation; `native/` contains the statically linked Swift Apple backend. `examples/` contains settings; `scripts/` contains build and smoke tests.
+This Cargo workspace contains the Zed WASM extension in `src/lib.rs` and the native LSP in `server/src/`. `extension.toml` registers C, C++, Rust, Python, Shell Script, Swift, and Dart; `server/src/languages.rs` describes each language. Tree-sitter identifies comments. `server/src/locale.rs` resolves the target language from `target_language` or the system locale. `server/src/segments.rs` keeps code blocks and inline code out of translation. `server/src/google.rs` implements portable Google HTTP translation; `server/src/mymemory.rs` implements the MyMemory fallback; `native/` contains the statically linked Swift Apple backend. `examples/` contains settings; `scripts/` contains build and smoke tests.
 
-Apple is the default on macOS with feature `apple`; Google is the default on Linux and builds without that feature. Never fall back from Apple to Google automatically. Only `cfg(all(target_os = "macos", feature = "apple"))` may reference Swift or Apple frameworks. `build.rs` must return early for other targets.
+Apple is the default on macOS with feature `apple`; Google is the default on Linux and builds without that feature. Never fall back from Apple to Google or MyMemory automatically. Google falls back to MyMemory unless `fallback` is `none`. Only `cfg(all(target_os = "macos", feature = "apple"))` may reference Swift or Apple frameworks. `build.rs` must return early for other targets.
 
 ## Build, Test, and Development Commands
 

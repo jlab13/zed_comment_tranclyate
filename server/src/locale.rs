@@ -62,6 +62,21 @@ pub fn language_from_locale(locale: &str) -> Option<String> {
     Some(if traditional { "zh-Hant" } else { "zh-Hans" }.into())
 }
 
+/// Код мови для Google і MyMemory: регіон відкидається, крім варіантів, які ці сервіси розрізняють.
+pub fn web_language(tag: &str) -> String {
+    let mut parts = tag.split(['-', '_']);
+    let language = parts.next().unwrap_or(tag).to_ascii_lowercase();
+    let rest: Vec<_> = parts.map(str::to_ascii_lowercase).collect();
+    let has = |value: &str| rest.iter().any(|part| part == value);
+    match language.as_str() {
+        "zh" if has("hant") || has("tw") || has("hk") || has("mo") => "zh-TW".into(),
+        "zh" => "zh-CN".into(),
+        "pt" if has("pt") => "pt-PT".into(),
+        "nb" | "nn" => "no".into(),
+        _ => language,
+    }
+}
+
 /// Визначає мову за змінними оточення POSIX; `get` дозволяє тестам не змінювати оточення процесу.
 pub fn from_env(get: impl Fn(&str) -> Option<String>) -> Option<TargetLanguage> {
     // LC_ALL переважає LC_MESSAGES, а LC_MESSAGES — LANG.

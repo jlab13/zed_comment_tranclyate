@@ -2,6 +2,7 @@ mod comments;
 mod google;
 mod languages;
 mod locale;
+mod mymemory;
 #[cfg(all(target_os = "macos", feature = "apple"))]
 mod native;
 mod segments;

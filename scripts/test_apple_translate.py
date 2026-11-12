@@ -60,6 +60,12 @@ class AppleTranslateTests(unittest.TestCase):
         self.assertNotEqual(status, 0)
         self.assertIn("target_language", body["error"])
 
+    def test_mymemory_can_be_checked_without_network(self):
+        status, body = self.invoke(json.dumps({"provider": "mymemory", "operation": "check", "target_language": "uk"}))
+        self.assertEqual(status, 0)
+        self.assertEqual(body["provider"], "mymemory")
+        self.assertEqual(body["status"], "network_required")
+
     def test_google_can_be_selected_without_apple_models(self):
         status, body = self.invoke(json.dumps({"provider": "google", "operation": "check"}))
         self.assertEqual(status, 0)

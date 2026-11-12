@@ -4,7 +4,8 @@
 
 Розширення для **macOS та Linux**, яке показує переклад коментаря мовою системи
 (або мовою з `target_language`) у стандартному hover-вікні Zed. На macOS та Linux типовий провайдер —
-**Google Translate** без API-ключа. **Apple Translation** доступний на macOS 26+ через конфігурацію.
+**Google Translate** без API-ключа; якщо Google не відповідає, переклад іде через **MyMemory**.
+**Apple Translation** доступний на macOS 26+ через конфігурацію.
 Підтримує **C, C++, Rust, Python, Shell Script (Bash), Swift і Dart**: рядкові, блокові
 й документаційні коментарі, а також docstring Python. Рядки, сирі рядки, інтерполяція та heredoc
 відрізняються від коментарів через Tree-sitter. Код у файлі не змінюється.
@@ -22,6 +23,7 @@
 
 ```text
 Zed → WASM-розширення → Rust LSP → Google Translate (Rust, усі платформи)
+                              ↳ MyMemory (Rust, запасний для Google)
                               → Apple Translation (Swift, лише macOS)
 ```
 
@@ -31,6 +33,7 @@ Zed → WASM-розширення → Rust LSP → Google Translate (Rust, ус�
 - `server/src/segments.rs` — захист коду: поділ на прозу й блоки коду, мітки для коду в реченнях.
 - `server/src/locale.rs` — визначення цільової мови із системної локалі.
 - `server/src/google.rs` — спільний Google HTTP-клієнт на reqwest/rustls.
+- `server/src/mymemory.rs` — клієнт MyMemory: поділ запитів на шматки, ліміти та помилки.
 - `native/` — Apple-перекладач Swift, вибір стратегії та C-сумісний міст.
 - `server/build.rs` — компонування Swift лише для macOS з feature `apple`.
 - `examples/` — налаштування Zed, гаряча клавіша та демо-файли з англійськими коментарями для кожної мови.
@@ -47,7 +50,8 @@ callback; між мовами не передається право власн�
 Якщо вихідна мова збігається з цільовою, текст повертається без змін.
 Apple на macOS 26.4+ спочатку перевіряє `highFidelity`, потім `lowLatency`; переклад
 виконується локально. Google використовує переносний HTTP-клієнт Rust reqwest із TLS rustls та інтернет.
-Провайдери не перемикаються автоматично в разі помилки.
+Apple ніколи не перемикається на інший провайдер. Google переходить на MyMemory, якщо
+не задано `"fallback": "none"` (див. [MyMemory](#mymemory)).
 До 256 успішних результатів кешуються в пам’яті; після заповнення кеш очищується.
 
 ## Збірка
@@ -111,7 +115,7 @@ Google працює без API-ключів і мовних пакетів Apple
 `https://translate.googleapis.com/translate_a/single` з `client=gtx`, а не платний Cloud
 Translation API. Цей вебінтерфейс може змінюватися або обмежувати частоту запитів.
 HTTP 403/429, помилки мережі й некоректний JSON показуються в hover українською.
-Кеш та об’єднання рядків в абзаци працюють для обох провайдерів.
+Кеш та об’єднання рядків в абзаци працюють для всіх провайдерів.
 
 Перевірка Google через CLI:
 
@@ -122,6 +126,48 @@ echo '{"provider":"google","text":"Return the next counter value.","source_langu
 
 `--check en` повертає `network_required` для типового Google; доступ до Google перевіряйте справжнім перекладом
 через `--translate` з `"provider":"google"`.
+
+### MyMemory
+
+[MyMemory](https://mymemory.translated.net/doc/spec.php) — безкоштовний публічний API перекладу
+від Translated S.r.l. (Італія). Він не потребує ключа, і сервер звертається до нього відкрито як
+`comment-translate-lsp/<версія>`. За замовчуванням MyMemory — запасний рушій для Google: якщо
+Google недоступний, обмежує частоту запитів або повертає помилку, той самий абзац іде в MyMemory,
+а причина записується в журнал мовного сервера. Після HTTP 429 чи 403 від Google сервер 5 хвилин
+не звертається до Google і надсилає запити одразу в MyMemory, щоб не смикати сервіс, який уже
+відмовляє. Коли запасний рушій увімкнено, Google отримує половину `timeout_seconds`, а MyMemory —
+другу половину. Якщо не відповіли обидва, hover показує обидві причини. Apple ніколи не
+перемикається.
+
+```json
+{
+  "lsp": {
+    "comment-translate": {
+      "initialization_options": {
+        "provider": "google",
+        "fallback": "mymemory",
+        "mymemory_email": "you@example.com"
+      }
+    }
+  }
+}
+```
+
+- `"fallback": "none"` вимикає запасний рушій: текст коментаря тоді йде лише до Google.
+- `"provider": "mymemory"` використовує MyMemory напряму, без Google.
+- Без адреси MyMemory дозволяє близько 5 000 символів на день; `mymemory_email` піднімає ліміт
+  приблизно до 50 000. Адреса надсилається MyMemory з кожним запитом; сервер сам її не підставляє.
+- MyMemory приймає не більше 500 символів за запит, тому довший текст ділиться за рядками,
+  реченнями або словами на запити до 450 байтів.
+- Якість перекладу зазвичай нижча, ніж у Google. З увімкненим запасним рушієм текст коментаря
+  може потрапити до другого стороннього сервісу.
+
+Перевірка MyMemory через CLI (CLI перевіряє лише вибраний сервіс, без запасного рушія):
+
+```sh
+echo '{"provider":"mymemory","text":"Return the next counter value.","source_language":"en"}' \
+  | ./target/release/comment-translate-lsp --translate
+```
 
 ## Мова перекладу
 
