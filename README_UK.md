@@ -32,7 +32,7 @@ Zed → WASM-розширення → Rust LSP → Google Translate (Rust, ус�
 - `server/src/google.rs` — спільний Google HTTP-клієнт на reqwest/rustls.
 - `native/` — Apple-перекладач Swift, вибір стратегії та C-сумісний міст.
 - `server/build.rs` — компонування Swift лише для macOS з feature `apple`.
-- `examples/` — налаштування Zed, гаряча клавіша та C-файли.
+- `examples/` — налаштування Zed, гаряча клавіша та демо-файли з англійськими коментарями для кожної мови.
 - `scripts/` — збірка й перевірки.
 
 Для Apple LSP викликає Swift-бібліотеку в тому самому процесі через C ABI. Відповідь надходить
