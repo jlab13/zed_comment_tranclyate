@@ -1,84 +1,87 @@
-# Переклад коментарів коду в Zed
+**English** · [Українська](README_UK.md)
 
-Розширення для **macOS та Linux**, яке показує переклад коментаря мовою системи
-(або мовою з `target_language`) у стандартному hover-вікні Zed. На macOS та Linux типовий провайдер —
-**Google Translate** без API-ключа. **Apple Translation** доступний на macOS 26+ через конфігурацію.
-Підтримує **C, C++, Rust, Python, Shell Script (Bash), Swift і Dart**: рядкові, блокові
-й документаційні коментарі, а також docstring Python. Рядки, сирі рядки, інтерполяція та heredoc
-відрізняються від коментарів через Tree-sitter. Код у файлі не змінюється.
+# Code Comment Translation for Zed
 
-| Мова Zed | Коментарі | Примітки |
+An extension for **macOS and Linux** that shows a translation of the comment under the cursor
+in Zed's standard hover popup, in the system language (or the language set in `target_language`).
+The default provider on both macOS and Linux is **Google Translate**, which needs no API key.
+**Apple Translation** is available on macOS 26+ through configuration.
+Supports **C, C++, Rust, Python, Shell Script (Bash), Swift, and Dart**: line, block,
+and documentation comments, plus Python docstrings. Tree-sitter tells strings, raw strings,
+interpolation, and heredocs apart from comments. The code in the file is never modified.
+
+| Zed language | Comments | Notes |
 | --- | --- | --- |
-| C, C++ | `//`, `///`, `//!`, `/* */`, `/** */`, `/*! */` | `.h` працює і в режимі C, і в режимі C++ |
-| Rust | `//`, `///`, `//!`, `/* */`, `/** */`, `/*! */` | вкладені блокові коментарі |
-| Swift | `//`, `///`, `/* */`, `/** */` | вкладені блокові коментарі; мову надає розширення Swift |
-| Dart | `//`, `///`, `/* */`, `/** */` | вкладені блокові коментарі; мову надає розширення Dart |
-| Python | `#`, docstring | shebang `#!` у першому рядку не перекладається |
-| Shell Script | `#` | shebang `#!` у першому рядку не перекладається |
+| C, C++ | `//`, `///`, `//!`, `/* */`, `/** */`, `/*! */` | `.h` works in both C and C++ mode |
+| Rust | `//`, `///`, `//!`, `/* */`, `/** */`, `/*! */` | nested block comments |
+| Swift | `//`, `///`, `/* */`, `/** */` | nested block comments; the language comes from the Swift extension |
+| Dart | `//`, `///`, `/* */`, `/** */` | nested block comments; the language comes from the Dart extension |
+| Python | `#`, docstrings | a `#!` shebang on the first line is not translated |
+| Shell Script | `#` | a `#!` shebang on the first line is not translated |
 
-## Архітектура
+## Architecture
 
 ```text
-Zed → WASM-розширення → Rust LSP → Google Translate (Rust, усі платформи)
-                              → Apple Translation (Swift, лише macOS)
+Zed → WASM extension → Rust LSP → Google Translate (Rust, all platforms)
+                             → Apple Translation (Swift, macOS only)
 ```
 
-- `src/lib.rs` — розширення Zed, яке запускає сервер.
-- `server/src/` — LSP, розпізнавання коментарів, UTF-16 координати й кеш.
-- `server/src/languages.rs` — таблиця мов: languageId, розширення файлів, граматика й маркери.
-- `server/src/locale.rs` — визначення цільової мови із системної локалі.
-- `server/src/google.rs` — спільний Google HTTP-клієнт на reqwest/rustls.
-- `native/` — Apple-перекладач Swift, вибір стратегії та C-сумісний міст.
-- `server/build.rs` — компонування Swift лише для macOS з feature `apple`.
-- `examples/` — налаштування Zed, гаряча клавіша та C-файли.
-- `scripts/` — збірка й перевірки.
+- `src/lib.rs` — the Zed extension that launches the server.
+- `server/src/` — the LSP, comment detection, UTF-16 positions, and the cache.
+- `server/src/languages.rs` — the language table: languageId, file extensions, grammar, and markers.
+- `server/src/locale.rs` — resolves the target language from the system locale.
+- `server/src/google.rs` — the shared Google HTTP client built on reqwest/rustls.
+- `native/` — the Swift Apple translator, strategy selection, and the C-compatible bridge.
+- `server/build.rs` — links Swift only on macOS with the `apple` feature.
+- `examples/` — Zed settings, a key binding, and C files.
+- `scripts/` — build and test scripts.
 
-Для Apple LSP викликає Swift-бібліотеку в тому самому процесі через C ABI. Відповідь надходить
-асинхронним callback. Swift копіює вхідний рядок, Rust копіює відповідь до завершення
-callback; між мовами не передається право власності на пам’ять. В Apple-збірці головний потік
-обслуговує чергу macOS, а Tokio/LSP працює на іншому потоці того самого процесу.
-На Linux Tokio/LSP запускається напряму без Swift і Apple-фреймворків.
-Цільова мова береться із системної локалі або з `target_language` (див. [Мова перекладу](#мова-перекладу)).
-Вихідна мова задається через `source_language`;
-`auto` використовує NaturalLanguage для Apple і визначення мови Google для Google.
-Якщо вихідна мова збігається з цільовою, текст повертається без змін.
-Apple на macOS 26.4+ спочатку перевіряє `highFidelity`, потім `lowLatency`; переклад
-виконується локально. Google використовує переносний HTTP-клієнт Rust reqwest із TLS rustls та інтернет.
-Провайдери не перемикаються автоматично в разі помилки.
-До 256 успішних результатів кешуються в пам’яті; після заповнення кеш очищується.
+For Apple, the LSP calls the Swift library in the same process through the C ABI. The response
+arrives through an asynchronous callback. Swift copies the input string and Rust copies the
+response before the callback returns, so memory ownership never crosses the language boundary.
+In the Apple build the main thread services the macOS queue, while Tokio/LSP runs on another
+thread of the same process. On Linux, Tokio/LSP runs directly without Swift or Apple frameworks.
+The target language comes from the system locale or from `target_language` (see
+[Translation language](#translation-language)). The source language is set with `source_language`;
+`auto` uses NaturalLanguage for Apple and Google's language detection for Google.
+If the source language matches the target language, the text is returned unchanged.
+On macOS 26.4+, Apple checks `highFidelity` first and then `lowLatency`; translation runs
+locally. Google uses the portable Rust reqwest HTTP client with rustls TLS and needs internet access.
+Providers never switch automatically on failure.
+Up to 256 successful results are cached in memory; when the cache is full, it is cleared.
 
-## Збірка
+## Building
 
-На обох платформах потрібні Rust через rustup, C-компілятор для Tree-sitter і доступ
-до crates.io для першого завантаження залежностей. Для Debian/Ubuntu C-компілятор
-можна встановити через `sudo apt install build-essential`. OpenSSL для Google не потрібен.
+Both platforms need Rust via rustup, a C compiler for Tree-sitter, and access to crates.io
+for the first dependency download. On Debian/Ubuntu, install a C compiler with
+`sudo apt install build-essential`. Google does not need OpenSSL.
 
-На macOS Apple-збірка додатково потребує macOS 26+ та Xcode із SDK macOS 26.4+.
-На Linux Swift, Xcode й Apple SDK не використовуються.
+On macOS, the Apple build additionally requires macOS 26+ and Xcode with the macOS 26.4+ SDK.
+Linux does not use Swift, Xcode, or the Apple SDK.
 
 ```sh
 rustup target add wasm32-wasip2
 ./scripts/build.sh
 ```
 
-Скрипт створює `target/release/comment-translate-lsp` і WASM-розширення. На macOS Cargo
-автоматично вбудовує Swift-бібліотеку; на Linux `build.rs` пропускає цей крок.
-`cfg(all(target_os = "macos", feature = "apple"))` відокремлює всі виклики Apple.
+The script builds `target/release/comment-translate-lsp` and the WASM extension. On macOS, Cargo
+embeds the Swift library automatically; on Linux, `build.rs` skips that step.
+`cfg(all(target_os = "macos", feature = "apple"))` isolates every Apple call.
 
-Для збірки без Apple навіть на macOS:
+To build without Apple, even on macOS:
 
 ```sh
 cargo build --release -p comment-translate-lsp --no-default-features
 ```
 
-У цьому режимі типовий провайдер — Google, `xcrun` не викликається, а вибір `apple`
-повертає зрозумілу помилку. На Linux feature `apple` не додає Apple-код навіть коли
-ввімкнена за замовчуванням. Не збирайте весь workspace для WASM: LSP є нативним процесом.
-Якщо раніше було задано `initialization_options.helper_path`, видаліть цей параметр.
+In this mode the default provider is Google, `xcrun` is never invoked, and selecting `apple`
+returns a clear error. On Linux, the `apple` feature adds no Apple code even though it is
+enabled by default. Do not build the whole workspace for WASM: the LSP is a native process.
+If you previously set `initialization_options.helper_path`, remove it.
 
-## Вибір провайдера
+## Choosing a provider
 
-Без поля `provider` використовується **Google на всіх платформах**. Для Google додайте до налаштувань Zed:
+Without a `provider` field, **Google is used on all platforms**. For Google, add to your Zed settings:
 
 ```json
 {
@@ -95,36 +98,36 @@ cargo build --release -p comment-translate-lsp --no-default-features
 }
 ```
 
-Щоб повернутися до Apple на macOS, встановіть `"provider": "apple"`.
-Поле `target_language` описано в розділі [Мова перекладу](#мова-перекладу).
-На Linux явний вибір `apple` відхиляється без звернення до Google.
-Збережіть наявне поле `binary` та інші налаштування. Після перемикання перезапустіть
-мовні сервери або Zed. Приклади: [`zed-settings.json`](examples/zed-settings.json)
-і [`zed-settings-google.json`](examples/zed-settings-google.json). Для Linux є
-[`zed-settings-linux.json`](examples/zed-settings-linux.json): замініть шлях до сервера.
+To switch back to Apple on macOS, set `"provider": "apple"`.
+The `target_language` field is described in [Translation language](#translation-language).
+On Linux, an explicit `apple` selection is rejected without contacting Google.
+Keep your existing `binary` field and other settings. After switching, restart the language
+servers or Zed. Examples: [`zed-settings.json`](examples/zed-settings.json)
+and [`zed-settings-google.json`](examples/zed-settings-google.json). For Linux there is
+[`zed-settings-linux.json`](examples/zed-settings-linux.json): replace the server path.
 
-Google працює без API-ключів і мовних пакетів Apple, але потребує інтернету та надсилає
-текст коментаря Google. Використовується веб endpoint
-`https://translate.googleapis.com/translate_a/single` з `client=gtx`, а не платний Cloud
-Translation API. Цей вебінтерфейс може змінюватися або обмежувати частоту запитів.
-HTTP 403/429, помилки мережі й некоректний JSON показуються в hover українською.
-Кеш та об’єднання рядків в абзаци працюють для обох провайдерів.
+Google works without API keys or Apple language packs, but it needs internet access and sends
+the comment text to Google. It uses the web endpoint
+`https://translate.googleapis.com/translate_a/single` with `client=gtx`, not the paid Cloud
+Translation API. This web interface may change or rate-limit requests.
+HTTP 403/429, network errors, and malformed JSON are shown in the hover in Ukrainian.
+Caching and joining lines into paragraphs work for both providers.
 
-Перевірка Google через CLI:
+Checking Google from the CLI:
 
 ```sh
 echo '{"provider":"google","text":"Return the next counter value.","source_language":"en"}' \
   | ./target/release/comment-translate-lsp --translate
 ```
 
-`--check en` повертає `network_required` для типового Google; доступ до Google перевіряйте справжнім перекладом
-через `--translate` з `"provider":"google"`.
+`--check en` returns `network_required` for the default Google provider; verify access to Google
+with a real translation through `--translate` with `"provider":"google"`.
 
-## Мова перекладу
+## Translation language
 
-Поле `target_language` в `initialization_options` задає мову перекладу кодом BCP 47:
-`"uk"`, `"en"`, `"de"`, `"pl"`, `"zh-Hans"`, `"zh-Hant"` тощо. Регістр і `_` замість `-`
-не мають значення: `uk_UA` стає `uk-UA`.
+The `target_language` field in `initialization_options` sets the translation language as a
+BCP 47 code: `"uk"`, `"en"`, `"de"`, `"pl"`, `"zh-Hans"`, `"zh-Hant"`, and so on. Case and `_`
+instead of `-` do not matter: `uk_UA` becomes `uk-UA`.
 
 ```json
 {
@@ -138,78 +141,77 @@ echo '{"provider":"google","text":"Return the next counter value.","source_langu
 }
 ```
 
-Якщо поле відсутнє або дорівнює `"auto"`, мова береться із системи під час запуску LSP:
+If the field is missing or set to `"auto"`, the language is taken from the system when the LSP starts:
 
-- macOS: перша мова зі списку **Системні параметри → Загальні → Мова й регіон**
-  (`defaults read -g AppleLanguages`), потім змінні оточення;
-- Linux: `LC_ALL`, `LC_MESSAGES`, `LANG` у порядку пріоритету POSIX; непорожній список
-  `LANGUAGE` (наприклад `uk:en`) має перевагу, крім локалі `C`/`POSIX`;
-- якщо мову не визначено (наприклад, `LANG=C.UTF-8`), використовується англійська.
+- macOS: the first language in **System Settings → General → Language & Region**
+  (`defaults read -g AppleLanguages`), then the environment variables;
+- Linux: `LC_ALL`, `LC_MESSAGES`, `LANG` in POSIX priority order; a non-empty
+  `LANGUAGE` list (for example `uk:en`) takes precedence, except for the `C`/`POSIX` locale;
+- if no language can be determined (for example, `LANG=C.UTF-8`), English is used.
 
-Регіон локалі не впливає на переклад (`uk_UA.UTF-8` → `uk`), але для китайської
-зберігається письмо: `zh_TW` → `zh-Hant`, `zh_CN` → `zh-Hans`. Вибрана мова та її джерело
-записуються в журнал мовного сервера (у палітрі команд Zed — `open language server logs`).
-Після зміни `target_language` або системної мови перезапустіть мовні сервери або Zed.
-Заголовок підказки показує код мови: `Переклад → uk`. Повідомлення про помилки
-залишаються українською.
+The locale region does not affect translation (`uk_UA.UTF-8` → `uk`), but Chinese keeps its
+script: `zh_TW` → `zh-Hant`, `zh_CN` → `zh-Hans`. The selected language and its source are
+written to the language server log (in Zed's command palette: `open language server logs`).
+After changing `target_language` or the system language, restart the language servers or Zed.
+The hover header shows the language code: `Переклад → uk`. Error messages stay in Ukrainian.
 
-## Моделі перекладу Apple (лише macOS)
+## Apple translation models (macOS only)
 
-На macOS 26.4+ перевірте, чи ввімкнено Apple Intelligence та завантажено його моделі:
-`highFidelity` може працювати без окремих мовних пакетів. Apple може використати
-традиційні моделі як заміну; назва стратегії не гарантує конкретну модель. Якщо жодна
-стратегія не готова, завантажте вихідну та цільову мови через **Системні параметри →
-Загальні → Мова й регіон → Мови перекладу**. Доступність перевіряється для конкретної
-мовної пари. На macOS 26.0–26.3 використовуються звичайні мовні пакети.
-Перевірка англійської → української:
+On macOS 26.4+, check that Apple Intelligence is enabled and its models are downloaded:
+`highFidelity` can work without separate language packs. Apple may fall back to traditional
+models; the strategy name does not guarantee a specific model. If no strategy is ready,
+download the source and target languages in **System Settings → General → Language & Region →
+Translation Languages**. Availability is checked for the specific language pair.
+macOS 26.0–26.3 uses regular language packs.
+Checking English → Ukrainian:
 
 ```sh
 echo '{"provider":"apple","operation":"check","source_language":"en","target_language":"uk"}' \
   | ./target/release/comment-translate-lsp --translate
 ```
 
-Відповідь `"status":"installed"` означає готовність. Поле `strategy` показує вибрану
-стратегію (`highFidelity` або `lowLatency`), а `checked_strategies` — результати виконаних
-перевірок. Готова `highFidelity` використовується одразу, без перевірки `lowLatency`.
-`supported` означає, що потрібні моделі ще не готові; `unsupported` — непідтримувану пару.
-Перевірка має ліміт 15 секунд.
-LSP не показує вікон завантаження. Якщо пакетів немає, hover пояснює,
-що потрібно зробити. Завантаження пакетів відбувається через системний інтерфейс.
+A `"status":"installed"` response means it is ready. The `strategy` field shows the selected
+strategy (`highFidelity` or `lowLatency`), and `checked_strategies` shows the results of the
+checks that ran. A ready `highFidelity` is used right away without checking `lowLatency`.
+`supported` means the required models are not ready yet; `unsupported` means the pair is not supported.
+The check is limited to 15 seconds.
+The LSP never shows download dialogs. If packs are missing, the hover explains
+what to do. Packs are downloaded through the system interface.
 
-Перевірка тексту через вбудовану бібліотеку:
+Checking a translation through the embedded library:
 
 ```sh
 echo '{"provider":"apple","text":"Return the next counter value.","source_language":"en"}' \
   | ./target/release/comment-translate-lsp --translate
 ```
 
-## Підключення до Zed
+## Connecting to Zed
 
-1. Виконайте `./scripts/build.sh`.
-2. У палітрі Zed виконайте `zed: install dev extension` і виберіть корінь проєкту.
-3. Додайте потрібні поля з [`examples/zed-settings.json`](examples/zed-settings.json)
-   в особисті налаштування Zed. Перевірте абсолютний шлях до LSP.
-4. Після зміни `initialization_options` перезапустіть мовні сервери або Zed.
-5. Відкрийте файл підтримуваної мови, наведіть на коментар або поставте курсор усередину
-   коментаря та викличте `editor: hover`. Приклад гарячої клавіші `ctrl-alt-t` наведено
-   в [`examples/keymap.json`](examples/keymap.json).
+1. Run `./scripts/build.sh`.
+2. In the Zed command palette, run `zed: install dev extension` and select the project root.
+3. Add the fields you need from [`examples/zed-settings.json`](examples/zed-settings.json)
+   to your personal Zed settings. Check the absolute path to the LSP.
+4. After changing `initialization_options`, restart the language servers or Zed.
+5. Open a file in a supported language, hover over a comment or place the cursor inside
+   a comment and run `editor: hover`. An example `ctrl-alt-t` key binding is in
+   [`examples/keymap.json`](examples/keymap.json).
 
-Основні сервери мов (`clangd`, `rust-analyzer`, `basedpyright` тощо) працюють як раніше:
-Zed запускає `comment-translate` поряд із ними через типове значення
-`"language_servers": ["..."]` і об’єднує їхні hover. Якщо для мови задано власний список
-`language_servers` без `"..."`, додайте до нього `"comment-translate"`.
-Swift і Dart з’являються в Zed лише після встановлення розширень Swift і Dart.
-Поза коментарями перекладач не викликається.
-Для англомовного коду можна встановити `"source_language": "en"`: визначення мови
-дуже коротких коментарів може бути неточним. Типове значення — `auto`.
+The primary language servers (`clangd`, `rust-analyzer`, `basedpyright`, and so on) work as before:
+Zed runs `comment-translate` alongside them through the default
+`"language_servers": ["..."]` value and merges their hovers. If a language has its own
+`language_servers` list without `"..."`, add `"comment-translate"` to it.
+Swift and Dart appear in Zed only after installing the Swift and Dart extensions.
+The translator is never called outside comments.
+For English-language code you can set `"source_language": "en"`: language detection for
+very short comments can be inaccurate. The default is `auto`.
 
-## Заголовки C (`.h`)
+## C headers (`.h`)
 
-Zed типово відкриває `.h` у режимі **C++**. Сервер зареєстровано і для C, і для C++,
-тому коментарі в заголовках перекладаються без асоціації `file_types`. Якщо проєкт
-перемикає `.h` на **C** через `file_types`, переклад теж працює.
+Zed opens `.h` files in **C++** mode by default. The server is registered for both C and C++,
+so comments in headers are translated without a `file_types` association. If a project
+switches `.h` to **C** through `file_types`, translation works as well.
 
-## Перевірки
+## Checks
 
 ```sh
 cargo fmt --all --check
@@ -220,52 +222,52 @@ python3 scripts/smoke_test.py
 ./scripts/test_native.sh
 ```
 
-Smoke test використовує справжній LSP і статичний Swift-міст з українським текстом,
-який не потребує мовних моделей. Перевіряє `.c`, `.h` у режимах C і C++, Rust, Python,
-Shell Script, ігнорування непідтримуваних мов, hover, редагування, закриття,
-ліміти й завершення процесу. Rust-тести для кожної мови перевіряють типи вузлів коментарів,
-маркери всередині рядків, групування рядків, docstring, shebang і UTF-16 координати. Rust-тести окремо перевіряють кешування, помилки, тайм-аут,
-передачу Unicode та безпечне ігнорування пізнього callback після скасування.
-`test_native.sh` перевіряє Swift та CLI лише для Apple-збірки на macOS. Спільні Rust-тести
-перевіряють Google: кодування параметрів, JSON і HTTP-помилки. Два loopback HTTP-тести
-позначені `ignored`, оскільки потребують дозволу створювати локальні TCP-сокети:
+The smoke test uses the real LSP and the static Swift bridge with Ukrainian text,
+which needs no language models. It covers `.c`, `.h` in C and C++ modes, Rust, Python,
+Shell Script, ignoring unsupported languages, hover, editing, closing,
+limits, and process shutdown. Per-language Rust tests cover comment node kinds,
+markers inside strings, line grouping, docstrings, shebangs, and UTF-16 positions. Separate Rust
+tests cover caching, errors, timeouts, Unicode transfer, and safely ignoring a late callback
+after cancellation. `test_native.sh` checks Swift and the CLI only for the Apple build on macOS.
+Shared Rust tests cover Google: parameter encoding, JSON, and HTTP errors. Two loopback HTTP
+tests are marked `ignored` because they need permission to open local TCP sockets:
 
 ```sh
 cargo test -p comment-translate-lsp -- --include-ignored
 cargo test -p comment-translate-lsp --no-default-features
 ```
 
-Linux CI запускає ці перевірки, збирає сервер і WASM, перевіряє CLI та LSP.
-Звичайні тести не потребують інтернету чи мовних моделей. Справжній переклад потребує
-готових моделей Apple або доступу до Google.
+Linux CI runs these checks, builds the server and WASM, and checks the CLI and LSP.
+Regular tests need neither internet access nor language models. Real translation needs
+ready Apple models or access to Google.
 
-## Обмеження
+## Limitations
 
-Підтримуються C, C++, Rust, Python, Shell Script, Swift і Dart на macOS та Linux;
-Apple-переклад потребує macOS 26+. Інші мови ігноруються: hover для них не з’являється.
-Мова визначається за `languageId` від Zed, а якщо він невідомий — за розширенням файлу.
-Сусідні рядкові коментарі (`//`, `///`, `//!` або `#`) без коду перед маркером
-перекладаються одним блоком. Порожній рядок, код або блоковий коментар відокремлює блоки.
-Порожній коментар `//` чи `#` усередині блоку зберігає розділення абзаців. Перед перекладом
-рядки всередині абзацу з’єднуються пробілами; межі абзаців зберігаються як подвійний перенос.
-Пункти списків (`1.`, `1)`, `-`, `*`, `+`, `•`) та Doxygen-теги (`@brief`, `@param`,
-`@return`, також форма `\param`) залишаються окремими рядками. Перенесений опис пункту
-з’єднується пробілами, а відступи вкладених пунктів зберігаються. Заголовки Markdown
-(`# Examples`) залишаються окремими рядками, а блоки коду в огородженні ```` ``` ```` чи `~~~`
-передаються дослівно, без з’єднання рядків. У вкладених коментарях Rust, Swift і Dart
-прибираються лише зовнішні `/*` та `*/`. Docstring Python — лише перший рядковий літерал
-модуля, класу чи функції без префіксів `f`/`b`/`t`; лапки й префікси `r`/`u` прибираються,
-відступи вирівнюються як в `inspect.cleandoc`. Інші рядки, f-рядки, heredoc і shebang
-не перекладаються. Усе це відбувається перед передачею тексту обраному перекладачу. Одночасно працює
-один запит перекладу; запити й очікування черги обмежуються `timeout_seconds`.
-За тайм-ауту запит Google скасовується в Rust; для Apple Rust від’єднує callback
-і скасовує Swift-задачу та активну сесію. Системні
-виклики можуть не реагувати на скасування відразу, тому Apple-міст утримує щонайбільше
-8 незавершених задач і відхиляє нові до звільнення місця. Помилка нативної бібліотеки
-тепер впливає на процес LSP, оскільки перекладач працює всередині нього.
-Власної команди перекладу немає: використовується стандартний hover Zed, тому переклад
-може запускатися й наведенням миші. Автоматичного встановлення нативних програм немає.
+C, C++, Rust, Python, Shell Script, Swift, and Dart are supported on macOS and Linux;
+Apple translation requires macOS 26+. Other languages are ignored: no hover appears for them.
+The language is determined by the `languageId` from Zed, or by the file extension if the ID is unknown.
+Adjacent line comments (`//`, `///`, `//!`, or `#`) with no code before the marker are
+translated as one block. A blank line, code, or a block comment separates blocks.
+An empty `//` or `#` comment inside a block keeps paragraphs apart. Before translation,
+lines within a paragraph are joined with spaces; paragraph boundaries are kept as a double line break.
+List items (`1.`, `1)`, `-`, `*`, `+`, `•`) and Doxygen tags (`@brief`, `@param`,
+`@return`, also the `\param` form) stay on separate lines. A wrapped item description is
+joined with spaces, and the indentation of nested items is preserved. Markdown headings
+(`# Examples`) stay on separate lines, and code blocks fenced with ```` ``` ```` or `~~~`
+are passed through verbatim, without joining lines. In nested Rust, Swift, and Dart comments,
+only the outer `/*` and `*/` are removed. A Python docstring is only the first string literal
+of a module, class, or function without an `f`/`b`/`t` prefix; quotes and `r`/`u` prefixes are
+removed, and indentation is normalized as in `inspect.cleandoc`. Other strings, f-strings,
+heredocs, and shebangs are not translated. All of this happens before the text is passed to the
+selected translator. One translation request runs at a time; requests and queue waits are
+limited by `timeout_seconds`. On timeout, the Google request is cancelled in Rust; for Apple,
+Rust detaches the callback and cancels the Swift task and the active session. System calls may
+not respond to cancellation immediately, so the Apple bridge holds at most 8 unfinished tasks
+and rejects new ones until a slot frees up. A failure in the native library now affects the LSP
+process, because the translator runs inside it.
+There is no dedicated translation command: Zed's standard hover is used, so translation can
+also be triggered by hovering the mouse. Native programs are not installed automatically.
 
-Документація: [розширення Zed](https://zed.dev/docs/extensions/developing-extensions),
+Documentation: [Zed extensions](https://zed.dev/docs/extensions/developing-extensions),
 [Apple Translation](https://developer.apple.com/documentation/translation),
-[сесія для встановлених мов](https://developer.apple.com/documentation/translation/translationsession/init(installedsource:target:)).
+[session for installed languages](https://developer.apple.com/documentation/translation/translationsession/init(installedsource:target:)).
