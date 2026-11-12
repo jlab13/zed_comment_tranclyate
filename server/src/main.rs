@@ -1,10 +1,12 @@
 mod comments;
 mod google;
+mod locale;
 #[cfg(all(target_os = "macos", feature = "apple"))]
 mod native;
 mod text;
 mod translate;
 
+use locale::TargetLanguage;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{Notify, RwLock};
 use tower::Service;
@@ -27,7 +29,14 @@ impl LanguageServer for Backend {
             .map_err(|err| jsonrpc::Error::invalid_params(err.to_string()))?
             .unwrap_or_default();
         config.validate().map_err(jsonrpc::Error::invalid_params)?;
-        *self.translator.write().await = Arc::new(Translator::new(config));
+        let target = config.target_language(locale::system_language);
+        self.client
+            .log_message(
+                MessageType::INFO,
+                format!("Мова перекладу: {} ({})", target.code, target.origin),
+            )
+            .await;
+        *self.translator.write().await = Arc::new(Translator::new(config, target));
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
@@ -94,7 +103,7 @@ impl LanguageServer for Backend {
         };
         let translator = self.translator.read().await.clone();
         let value = match translator.translate(&comment.text).await {
-            Ok(text) => format!("Переклад українською\n\n{text}"),
+            Ok(text) => format!("Переклад → {}\n\n{text}", translator.target().code),
             Err(error) => {
                 self.client.log_message(MessageType::WARNING, &error).await;
                 format!("Переклад недоступний\n\n{error}")
@@ -174,7 +183,10 @@ fn run_server() {
         let (service, socket) = LspService::new(|client| Backend {
             client,
             documents: RwLock::new(HashMap::new()),
-            translator: RwLock::new(Arc::new(Translator::new(Config::default()))),
+            translator: RwLock::new(Arc::new(Translator::new(
+                Config::default(),
+                TargetLanguage::fallback(),
+            ))),
         });
         let exit = Arc::new(Notify::new());
         let service = ExitAware {
@@ -200,12 +212,17 @@ async fn diagnostics() -> Option<i32> {
         return None;
     }
     let input = match args[0].as_str() {
-        "--check" if args.len() <= 2 => serde_json::json!({
-            "operation":"check",
-            "source_language":args.get(1).map(String::as_str).unwrap_or("en"),
-            "timeout_seconds":15
-        })
-        .to_string(),
+        "--check" if args.len() <= 3 => {
+            let mut request = serde_json::json!({
+                "operation":"check",
+                "source_language":args.get(1).map(String::as_str).unwrap_or("en"),
+                "timeout_seconds":15
+            });
+            if let Some(target) = args.get(2) {
+                request["target_language"] = target.as_str().into();
+            }
+            request.to_string()
+        }
         "--translate" if args.len() == 1 => {
             let mut input = String::new();
             if std::io::stdin().read_to_string(&mut input).is_err() {
@@ -214,7 +231,7 @@ async fn diagnostics() -> Option<i32> {
             input
         }
         _ => {
-            eprintln!("Використання: comment-translate-lsp [--check en | --translate]");
+            eprintln!("Використання: comment-translate-lsp [--check en [uk] | --translate]");
             return Some(1);
         }
     };

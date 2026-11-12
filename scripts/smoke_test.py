@@ -78,6 +78,7 @@ def main():
             "capabilities": {},
             "initializationOptions": {
                 "source_language": "uk",
+                "target_language": "uk",
                 "provider": provider,
             },
         }, request=True)
@@ -107,7 +108,7 @@ def main():
         change(6, "/**\n * @brief Ініціалізувати контекст.\n *\n * Дії:\n * 1. Відкрити інтерфейс\n * 2. Створити чергу\n *\n * Параметри:\n * - Вузол\n *   - Ідентифікатор\n * @param node Вказівник на вузол.\n * @return 0 у разі успіху.\n */")
         formatted = hover(5)["contents"]["value"]
         expected = "@brief Ініціалізувати контекст.\n\nДії:\n1. Відкрити інтерфейс\n2. Створити чергу\n\nПараметри:\n- Вузол\n  - Ідентифікатор\n@param node Вказівник на вузол.\n@return 0 у разі успіху."
-        assert formatted == "Переклад українською\n\n" + expected, formatted
+        assert formatted == "Переклад → uk\n\n" + expected, formatted
         send("textDocument/didClose", {"textDocument": {"uri": uri}})
         assert hover() is None
         uri = "file:///tmp/comment-translate-smoke.h"

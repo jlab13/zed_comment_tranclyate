@@ -6,6 +6,7 @@ struct TranslationRequest: Decodable {
     let operation: String?
     let text: String?
     let source_language: String?
+    let target_language: String?
     let timeout_seconds: Int?
 }
 
@@ -45,8 +46,10 @@ struct TranslationService {
         guard (1...300).contains(request.timeout_seconds ?? 60) else {
             return TranslationResponse(provider: provider, error: "timeout_seconds має бути в межах 1–300.")
         }
+        // Rust завжди передає визначену мову; запасний варіант — мова інтерфейсу macOS.
+        let target = request.target_language ?? Locale.preferredLanguages.first ?? "en"
         if request.operation == "check" {
-            var response = await AppleTranslate.check(source: request.source_language ?? "en")
+            var response = await AppleTranslate.check(source: request.source_language ?? "en", target: target)
             response.provider = provider
             return response
         }
@@ -63,7 +66,7 @@ struct TranslationService {
         guard !requestedSource.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return TranslationResponse(provider: provider, error: "source_language не може бути порожнім.")
         }
-        if Locale.Language(identifier: requestedSource).languageCode?.identifier == "uk" {
+        if AppleTranslate.sameLanguage(requestedSource, target) {
             return TranslationResponse(provider: provider, translation: text, source_language: requestedSource)
         }
         let source: String
@@ -75,10 +78,10 @@ struct TranslationService {
         } else {
             source = requestedSource
         }
-        if Locale.Language(identifier: source).languageCode?.identifier == "uk" {
+        if AppleTranslate.sameLanguage(source, target) {
             return TranslationResponse(provider: provider, translation: text, source_language: source)
         }
-        var response = await AppleTranslate.translate(text, source: source)
+        var response = await AppleTranslate.translate(text, source: source, target: target)
         response.provider = provider
         return response
     }

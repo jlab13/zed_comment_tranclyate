@@ -86,7 +86,8 @@ mod tests {
     #[tokio::test]
     async fn static_bridge_preserves_unicode_and_embedded_null() {
         let text = "Український текст 😀\u{0} другий рядок\n";
-        let input = serde_json::json!({"text":text,"source_language":"uk"}).to_string();
+        let input = serde_json::json!({"text":text,"source_language":"uk","target_language":"uk"})
+            .to_string();
         let reply = request(input, Duration::from_secs(3)).await.unwrap();
         let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
         assert_eq!(reply["translation"], text);
@@ -97,7 +98,7 @@ mod tests {
         let reply = request("{".into(), Duration::from_secs(3)).await.unwrap();
         assert!(reply.contains("JSON"));
         let reply = request(
-            r#"{"operation":"check","source_language":"uk"}"#.into(),
+            r#"{"operation":"check","source_language":"uk","target_language":"uk-UA"}"#.into(),
             Duration::from_secs(3),
         )
         .await

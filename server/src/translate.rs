@@ -1,4 +1,5 @@
 use crate::google;
+use crate::locale::{self, TargetLanguage};
 #[cfg(all(target_os = "macos", feature = "apple"))]
 use crate::native;
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,8 @@ impl Provider {
 pub struct Config {
     pub provider: Provider,
     pub source_language: String,
+    /// Мова перекладу; відсутнє поле або `auto` означає мову системної локалі.
+    pub target_language: Option<String>,
     pub timeout_seconds: u64,
     pub max_comment_chars: usize,
 }
@@ -37,6 +40,7 @@ impl Default for Config {
         Self {
             provider: Provider::default(),
             source_language: "auto".into(),
+            target_language: None,
             timeout_seconds: 60,
             max_comment_chars: 4000,
         }
@@ -52,12 +56,38 @@ impl Config {
         if self.source_language.trim().is_empty() {
             return Err("source_language має бути auto або кодом мови, наприклад en".into());
         }
+        explicit_target(self.target_language.as_deref())?;
         if !(1..=300).contains(&self.timeout_seconds)
             || !(1..=20000).contains(&self.max_comment_chars)
         {
             return Err("timeout_seconds: 1–300; max_comment_chars: 1–20000".into());
         }
         Ok(())
+    }
+
+    /// Явна мова з налаштувань або мова системи, яку повертає `detect`.
+    pub fn target_language(&self, detect: impl FnOnce() -> TargetLanguage) -> TargetLanguage {
+        match explicit_target(self.target_language.as_deref()) {
+            Ok(Some(code)) => TargetLanguage {
+                code,
+                origin: "налаштування target_language".into(),
+            },
+            _ => detect(),
+        }
+    }
+}
+
+const TARGET_ERROR: &str =
+    "target_language має бути кодом мови, наприклад uk, en або zh-Hans; auto або відсутнє поле — мова системи";
+
+/// Явна цільова мова; `None` означає, що її треба взяти із системної локалі.
+fn explicit_target(value: Option<&str>) -> Result<Option<String>, String> {
+    match value.map(str::trim) {
+        None => Ok(None),
+        Some(tag) if tag.eq_ignore_ascii_case("auto") => Ok(None),
+        Some(tag) => locale::normalize_tag(tag)
+            .map(Some)
+            .ok_or_else(|| TARGET_ERROR.into()),
     }
 }
 
@@ -70,21 +100,22 @@ struct Response {
 
 #[tower_lsp::async_trait]
 trait Engine: Send + Sync {
-    async fn translate(&self, text: &str, config: &Config) -> Result<String, String>;
+    async fn translate(&self, text: &str, config: &Config, target: &str) -> Result<String, String>;
 }
 
 struct ProviderEngine;
 
 #[tower_lsp::async_trait]
 impl Engine for ProviderEngine {
-    async fn translate(&self, text: &str, config: &Config) -> Result<String, String> {
-        if source_is_ukrainian(&config.source_language) {
+    async fn translate(&self, text: &str, config: &Config, target: &str) -> Result<String, String> {
+        if same_language(&config.source_language, target) {
             return Ok(text.to_owned());
         }
         match config.provider {
             Provider::Google => google::translate(
                 text,
                 &config.source_language,
+                target,
                 Duration::from_secs(config.timeout_seconds),
             )
             .await
@@ -92,7 +123,7 @@ impl Engine for ProviderEngine {
             Provider::Apple => {
                 #[cfg(all(target_os = "macos", feature = "apple"))]
                 {
-                    let payload = json!({"provider":"apple", "text":text, "source_language":config.source_language}).to_string();
+                    let payload = json!({"provider":"apple", "text":text, "source_language":config.source_language, "target_language":target}).to_string();
                     let response =
                         native::request(payload, Duration::from_secs(config.timeout_seconds))
                             .await?;
@@ -117,6 +148,7 @@ impl Engine for ProviderEngine {
 
 pub struct Translator {
     config: Config,
+    target: TargetLanguage,
     engine: Arc<dyn Engine>,
     cache: Mutex<HashMap<String, String>>,
     // Серіалізуємо переклади; повторний hover отримує результат із кешу.
@@ -124,13 +156,18 @@ pub struct Translator {
 }
 
 impl Translator {
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config, target: TargetLanguage) -> Self {
         Self {
             config,
+            target,
             engine: Arc::new(ProviderEngine),
             cache: Mutex::new(HashMap::new()),
             gate: Mutex::new(()),
         }
+    }
+
+    pub fn target(&self) -> &TargetLanguage {
+        &self.target
     }
 
     pub async fn translate(&self, text: &str) -> Result<String, String> {
@@ -142,7 +179,10 @@ impl Translator {
             if let Some(cached) = self.cache.lock().await.get(text).cloned() {
                 return Ok(cached);
             }
-            let translated = self.engine.translate(text, &self.config).await?;
+            let translated = self
+                .engine
+                .translate(text, &self.config, &self.target.code)
+                .await?;
             let mut cache = self.cache.lock().await;
             if cache.len() >= 256 {
                 cache.clear();
@@ -156,11 +196,10 @@ impl Translator {
     }
 }
 
-fn source_is_ukrainian(source: &str) -> bool {
-    source
-        .split(['-', '_'])
-        .next()
-        .is_some_and(|language| language.eq_ignore_ascii_case("uk"))
+/// Мови збігаються без урахування регіону: `uk-UA` і `uk`; `auto` не збігається ні з чим.
+fn same_language(source: &str, target: &str) -> bool {
+    locale::language_from_locale(source)
+        .is_some_and(|source| Some(source) == locale::language_from_locale(target))
 }
 
 #[cfg(not(all(target_os = "macos", feature = "apple")))]
@@ -175,6 +214,7 @@ struct DiagnosticRequest {
     operation: Option<String>,
     text: Option<String>,
     source_language: Option<String>,
+    target_language: Option<String>,
     timeout_seconds: Option<u64>,
 }
 
@@ -186,12 +226,21 @@ pub async fn diagnose(input: &str) -> Result<serde_json::Value, String> {
     if !(1..=300).contains(&seconds) {
         return Err("timeout_seconds має бути в межах 1–300".into());
     }
+    let target = explicit_target(request.target_language.as_deref())?
+        .unwrap_or_else(|| locale::system_language().code);
     if provider == Provider::Apple {
         #[cfg(all(target_os = "macos", feature = "apple"))]
         {
-            let reply = native::request(input.to_owned(), Duration::from_secs(seconds)).await?;
-            return serde_json::from_str(&reply)
-                .map_err(|_| "Некоректний JSON від Apple Translation".into());
+            // Swift отримує вже визначену мову, щоб CLI і LSP поводилися однаково.
+            let mut payload: serde_json::Value = serde_json::from_str(input).map_err(|_| {
+                "Некоректний запит JSON: перевірте text, provider та timeout_seconds"
+            })?;
+            with_target(&mut payload, &target);
+            let reply = native::request(payload.to_string(), Duration::from_secs(seconds)).await?;
+            let mut reply: serde_json::Value = serde_json::from_str(&reply)
+                .map_err(|_| "Некоректний JSON від Apple Translation")?;
+            with_target(&mut reply, &target);
+            return Ok(reply);
         }
         #[cfg(not(all(target_os = "macos", feature = "apple")))]
         {
@@ -199,7 +248,11 @@ pub async fn diagnose(input: &str) -> Result<serde_json::Value, String> {
         }
     }
     match request.operation.as_deref() {
-        Some("check") => return Ok(json!({"provider":"google", "status":"network_required"})),
+        Some("check") => {
+            return Ok(
+                json!({"provider":"google", "status":"network_required", "target_language":target}),
+            )
+        }
         None | Some("translate") => {}
         _ => return Err("Невідома операція перекладу".into()),
     }
@@ -213,13 +266,22 @@ pub async fn diagnose(input: &str) -> Result<serde_json::Value, String> {
     if source.trim().is_empty() {
         return Err("source_language не може бути порожнім".into());
     }
-    if source_is_ukrainian(&source) {
-        return Ok(json!({"provider":"google", "translation":text, "source_language":source}));
+    if same_language(&source, &target) {
+        return Ok(
+            json!({"provider":"google", "translation":text, "source_language":source, "target_language":target}),
+        );
     }
-    let reply = google::translate(&text, &source, Duration::from_secs(seconds)).await?;
+    let reply = google::translate(&text, &source, &target, Duration::from_secs(seconds)).await?;
     Ok(
-        json!({"provider":"google", "translation":reply.translation, "source_language":reply.source_language}),
+        json!({"provider":"google", "translation":reply.translation, "source_language":reply.source_language, "target_language":target}),
     )
+}
+
+#[cfg(all(target_os = "macos", feature = "apple"))]
+fn with_target(value: &mut serde_json::Value, target: &str) {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("target_language".into(), target.into());
+    }
 }
 
 #[cfg(test)]
@@ -235,7 +297,7 @@ mod tests {
 
     #[tower_lsp::async_trait]
     impl Engine for MockEngine {
-        async fn translate(&self, _: &str, _: &Config) -> Result<String, String> {
+        async fn translate(&self, _: &str, _: &Config, _: &str) -> Result<String, String> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             tokio::time::sleep(self.delay).await;
             if self.fail {
@@ -252,10 +314,13 @@ mod tests {
             fail,
             delay,
         });
-        let mut translator = Translator::new(Config {
-            timeout_seconds: 1,
-            ..Config::default()
-        });
+        let mut translator = Translator::new(
+            Config {
+                timeout_seconds: 1,
+                ..Config::default()
+            },
+            TargetLanguage::fallback(),
+        );
         translator.engine = engine.clone();
         (translator, engine)
     }
@@ -357,10 +422,88 @@ mod tests {
 
     #[tokio::test]
     async fn google_diagnostics_do_not_need_apple_models() {
-        let value = diagnose(r#"{"provider":"google","text":"Текст 😀","source_language":"uk"}"#)
-            .await
-            .unwrap();
+        let value = diagnose(
+            r#"{"provider":"google","text":"Текст 😀","source_language":"uk","target_language":"uk"}"#,
+        )
+        .await
+        .unwrap();
         assert_eq!(value["provider"], "google");
         assert_eq!(value["translation"], "Текст 😀");
+        assert_eq!(value["target_language"], "uk");
+    }
+
+    #[test]
+    fn validates_target_language() {
+        for target in ["uk", "DE_at", "zh-Hant", "auto", " AUTO "] {
+            let config = Config {
+                target_language: Some(target.into()),
+                ..Config::default()
+            };
+            assert!(config.validate().is_ok(), "{target}");
+        }
+        for target in ["", "C", "українська", "uk ua"] {
+            let config = Config {
+                target_language: Some(target.into()),
+                ..Config::default()
+            };
+            assert!(config.validate().unwrap_err().contains("target_language"));
+        }
+    }
+
+    #[test]
+    fn explicit_target_language_overrides_system_locale() {
+        let config: Config = serde_json::from_str(r#"{"target_language":"de_AT"}"#).unwrap();
+        let target = config.target_language(|| panic!("локаль не потрібна"));
+        assert_eq!(target.code, "de-AT");
+        assert!(target.origin.contains("target_language"));
+    }
+
+    #[test]
+    fn missing_or_auto_target_language_uses_system_locale() {
+        let detected = || TargetLanguage {
+            code: "pl".into(),
+            origin: "LANG=pl_PL.UTF-8".into(),
+        };
+        for json in ["{}", r#"{"target_language":"auto"}"#] {
+            let config: Config = serde_json::from_str(json).unwrap();
+            assert_eq!(config.target_language(detected), detected());
+        }
+    }
+
+    #[test]
+    fn compares_languages_without_region() {
+        assert!(same_language("uk", "uk-UA"));
+        assert!(same_language("EN_us", "en"));
+        assert!(!same_language("auto", "uk"));
+        assert!(!same_language("en", "uk"));
+        assert!(!same_language("zh-Hant", "zh-Hans"));
+    }
+
+    #[tokio::test]
+    async fn same_source_and_target_skip_the_provider() {
+        let config = Config {
+            source_language: "de".into(),
+            ..Config::default()
+        };
+        let text = ProviderEngine
+            .translate("Der Wert 😀", &config, "de-AT")
+            .await
+            .unwrap();
+        assert_eq!(text, "Der Wert 😀");
+    }
+
+    #[tokio::test]
+    async fn diagnostics_report_target_language_and_reject_invalid_values() {
+        let value = diagnose(r#"{"operation":"check","target_language":"PL"}"#)
+            .await
+            .unwrap();
+        assert_eq!(value["status"], "network_required");
+        assert_eq!(value["target_language"], "pl");
+        assert!(
+            diagnose(r#"{"text":"Hello","target_language":"Polish language"}"#)
+                .await
+                .unwrap_err()
+                .contains("target_language")
+        );
     }
 }

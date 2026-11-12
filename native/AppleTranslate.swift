@@ -2,14 +2,25 @@ import Foundation
 import Translation
 
 struct AppleTranslate {
+    /// Мови збігаються без урахування регіону: uk-UA і uk. Китайська розрізняє письмо.
+    static func sameLanguage(_ source: String, _ target: String) -> Bool {
+        let source = Locale.Language(identifier: source)
+        let target = Locale.Language(identifier: target)
+        guard let code = source.languageCode, code == target.languageCode else { return false }
+        guard code.identifier == "zh" else { return true }
+        // Повний ідентифікатор додає типове письмо: zh → zh-Hans-CN, zh-TW → zh-Hant-TW.
+        let script = { (language: Locale.Language) in Locale.Language(identifier: language.maximalIdentifier).script }
+        return script(source) == script(target)
+    }
+
     @available(macOS 26.0, *)
-    static func check(source: String) async -> TranslationResponse {
-        if Locale.Language(identifier: source).languageCode?.identifier == "uk" {
+    static func check(source: String, target: String) async -> TranslationResponse {
+        if sameLanguage(source, target) {
             return TranslationResponse(status: "same_language", source_language: source)
         }
-        let selection = await selectStrategy(source: Locale.Language(identifier: source))
+        let selection = await selectStrategy(source: Locale.Language(identifier: source), target: Locale.Language(identifier: target))
         return TranslationResponse(
-            error: availabilityError(selection.status, source: source),
+            error: availabilityError(selection.status, source: source, target: target),
             status: selection.status.rawValue,
             source_language: source,
             strategy: selection.strategy?.rawValue,
@@ -28,8 +39,7 @@ struct AppleTranslate {
     }
 
     @available(macOS 26.0, *)
-    static func selectStrategy(source: Locale.Language) async -> StrategySelection {
-        let target = Locale.Language(identifier: "uk")
+    static func selectStrategy(source: Locale.Language, target: Locale.Language) async -> StrategySelection {
         if #available(macOS 26.4, *) {
             let high = availability(await LanguageAvailability(preferredStrategy: .highFidelity)
                 .status(from: source, to: target))
@@ -48,28 +58,28 @@ struct AppleTranslate {
         return StrategySelection.choose(highFidelity: nil, lowLatency: low)
     }
 
-    static func availabilityError(_ status: TranslationAvailability, source: String) -> String? {
+    static func availabilityError(_ status: TranslationAvailability, source: String, target: String) -> String? {
         switch status {
         case .installed: return nil
-        case .supported: return missingLanguages(source)
-        case .unsupported: return "Apple Translation не підтримує переклад \(source) → uk."
+        case .supported: return missingLanguages(source, target: target)
+        case .unsupported: return "Apple Translation не підтримує переклад \(source) → \(target)."
         case .unknown: return "Невідомий стан моделей Apple Translation."
         }
     }
 
-    static func missingLanguages(_ source: String) -> String {
-        "Моделі перекладу \(source) → uk не готові. На macOS 26.4+ перевірте, чи ввімкнено Apple Intelligence та завантажено його моделі. Або завантажте вихідну мову й українську: Системні параметри → Загальні → Мова й регіон → Мови перекладу."
+    static func missingLanguages(_ source: String, target: String) -> String {
+        "Моделі перекладу \(source) → \(target) не готові. На macOS 26.4+ перевірте, чи ввімкнено Apple Intelligence та завантажено його моделі. Або завантажте вихідну й цільову мови: Системні параметри → Загальні → Мова й регіон → Мови перекладу."
     }
 
     @available(macOS 26.0, *)
-    static func translate(_ text: String, source: String) async -> TranslationResponse {
+    static func translate(_ text: String, source: String, target: String) async -> TranslationResponse {
         let sourceLanguage = Locale.Language(identifier: source)
-        let targetLanguage = Locale.Language(identifier: "uk")
-        let selection = await selectStrategy(source: sourceLanguage)
+        let targetLanguage = Locale.Language(identifier: target)
+        let selection = await selectStrategy(source: sourceLanguage, target: targetLanguage)
         guard !Task.isCancelled else { return TranslationResponse(error: "Переклад скасовано.") }
         guard let strategy = selection.strategy else {
             return TranslationResponse(
-                error: availabilityError(selection.status, source: source),
+                error: availabilityError(selection.status, source: source, target: target),
                 status: selection.status.rawValue,
                 source_language: source,
                 checked_strategies: selection.checkedStrategies
@@ -90,7 +100,7 @@ struct AppleTranslate {
             }
             return TranslationResponse(translation: response.targetText, source_language: source, strategy: strategy.rawValue)
         } catch TranslationError.notInstalled {
-            return TranslationResponse(error: missingLanguages(source))
+            return TranslationResponse(error: missingLanguages(source, target: target))
         } catch {
             return TranslationResponse(error: "Не вдалося виконати переклад Apple Translation: \(error.localizedDescription)")
         }

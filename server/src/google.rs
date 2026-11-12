@@ -24,13 +24,29 @@ fn client() -> Result<&'static Client, String> {
         .map_err(Clone::clone)
 }
 
-fn url(text: &str, source: &str) -> Url {
+/// Код мови у форматі Google: регіон відкидається, крім варіантів, які Google розрізняє.
+fn google_language(tag: &str) -> String {
+    let mut parts = tag.split(['-', '_']);
+    let language = parts.next().unwrap_or(tag).to_ascii_lowercase();
+    let rest: Vec<_> = parts.map(str::to_ascii_lowercase).collect();
+    let has = |value: &str| rest.iter().any(|part| part == value);
+    match language.as_str() {
+        "zh" if has("hant") || has("tw") || has("hk") || has("mo") => "zh-TW".into(),
+        "zh" => "zh-CN".into(),
+        "pt" if has("pt") => "pt-PT".into(),
+        "nb" | "nn" => "no".into(),
+        _ => language,
+    }
+}
+
+fn url(text: &str, source: &str, target: &str) -> Url {
     let mut url = Url::parse(ENDPOINT).expect("Некоректна вбудована адреса Google");
+    let target = google_language(target);
     // form_urlencoded зберігає буквальні +, &, # та Unicode у тексті коментаря.
     url.query_pairs_mut().extend_pairs([
         ("client", "gtx"),
         ("sl", source),
-        ("tl", "uk"),
+        ("tl", target.as_str()),
         ("dt", "t"),
         ("ie", "UTF-8"),
         ("oe", "UTF-8"),
@@ -83,9 +99,10 @@ fn decode(body: &[u8], status: u16, source: &str) -> Result<Translation, String>
 pub async fn translate(
     text: &str,
     source: &str,
+    target: &str,
     deadline: Duration,
 ) -> Result<Translation, String> {
-    translate_at(client()?, url(text, source), deadline, source).await
+    translate_at(client()?, url(text, source, target), deadline, source).await
 }
 
 async fn translate_at(
@@ -135,7 +152,7 @@ mod tests {
     #[test]
     fn query_preserves_unicode_and_browser_headers() {
         let text = "C++ & ключ=value? #fragment\nДругий абзац.";
-        let url = url(text, "auto");
+        let url = url(text, "auto", "uk-UA");
         let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
         assert_eq!(query["q"], text);
         assert_eq!(query["client"], "gtx");
@@ -147,6 +164,26 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(request.headers()[header::USER_AGENT], USER_AGENT);
+    }
+
+    #[test]
+    fn target_language_uses_google_codes() {
+        for (target, expected) in [
+            ("uk", "uk"),
+            ("de-AT", "de"),
+            ("zh-Hans", "zh-CN"),
+            ("zh", "zh-CN"),
+            ("zh-Hant", "zh-TW"),
+            ("zh-HK", "zh-TW"),
+            ("pt-BR", "pt"),
+            ("pt-PT", "pt-PT"),
+            ("nb", "no"),
+        ] {
+            assert_eq!(google_language(target), expected, "{target}");
+            let url = url("Text", "en", target);
+            let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+            assert_eq!(query["tl"], expected);
+        }
     }
 
     #[test]

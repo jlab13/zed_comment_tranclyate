@@ -21,7 +21,7 @@ class AppleTranslateTests(unittest.TestCase):
 
     def test_returns_ukrainian_unchanged(self):
         text = "Повернути `next_value()` без змін.\nДругий рядок."
-        status, body = self.invoke(json.dumps({"text": text, "source_language": "uk"}))
+        status, body = self.invoke(json.dumps({"text": text, "source_language": "uk", "target_language": "uk"}))
         self.assertEqual(status, 0)
         self.assertEqual(body["translation"], text)
 
@@ -50,6 +50,16 @@ class AppleTranslateTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(body["status"], "network_required")
 
+    def test_check_accepts_target_language(self):
+        status, body = self.invoke("", ("--check", "en", "de_AT"))
+        self.assertEqual(status, 0)
+        self.assertEqual(body["target_language"], "de-AT")
+
+    def test_rejects_invalid_target_language(self):
+        status, body = self.invoke(json.dumps({"text": "Text", "target_language": "German"}))
+        self.assertNotEqual(status, 0)
+        self.assertIn("target_language", body["error"])
+
     def test_google_can_be_selected_without_apple_models(self):
         status, body = self.invoke(json.dumps({"provider": "google", "operation": "check"}))
         self.assertEqual(status, 0)
@@ -57,7 +67,8 @@ class AppleTranslateTests(unittest.TestCase):
         self.assertEqual(body["status"], "network_required")
 
     def test_google_returns_explicit_ukrainian_without_a_request(self):
-        status, body = self.invoke(json.dumps({"provider": "google", "source_language": "uk", "text": "Український текст"}))
+        status, body = self.invoke(json.dumps({"provider": "google", "source_language": "uk", "target_language": "uk",
+                                               "text": "Український текст"}))
         self.assertEqual(status, 0)
         self.assertEqual(body["provider"], "google")
         self.assertEqual(body["translation"], "Український текст")
@@ -68,7 +79,7 @@ class AppleTranslateTests(unittest.TestCase):
         self.assertIn("provider", body["error"])
 
     def test_omitted_provider_defaults_to_google(self):
-        status, body = self.invoke(json.dumps({"source_language": "uk", "text": "Текст"}))
+        status, body = self.invoke(json.dumps({"source_language": "uk", "target_language": "uk", "text": "Текст"}))
         self.assertEqual(status, 0)
         self.assertEqual(body["provider"], "google")
 
