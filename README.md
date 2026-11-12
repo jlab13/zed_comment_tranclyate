@@ -32,6 +32,7 @@ Zed → WASM extension → Rust LSP → Google Translate (Rust, all platforms)
 - `server/src/` — the LSP, comment detection, UTF-16 positions, and the cache.
 - `server/src/languages.rs` — the language table: languageId, file extensions, grammar, and markers.
 - `server/src/segments.rs` — code protection: splitting into prose and code blocks, labels for inline code.
+- `server/src/cache.rs` — the persistent translation cache on disk.
 - `server/src/locale.rs` — resolves the target language from the system locale.
 - `server/src/google.rs` — the shared Google HTTP client built on reqwest/rustls.
 - `server/src/mymemory.rs` — the MyMemory client: request chunking, quota and error handling.
@@ -47,7 +48,7 @@ If the source language matches the target language, the text is returned unchang
 Every provider uses the Rust reqwest HTTP client with rustls TLS and needs internet access.
 DeepL falls back to Google and MyMemory, and Google to
 MyMemory, unless `fallback` says otherwise (see [Fallback order](#fallback-order)).
-Up to 256 successful results are cached in memory; when the cache is full, it is cleared.
+Translations are cached in memory and on disk (see [Translation cache](#translation-cache)).
 
 ## Building
 
@@ -234,6 +235,38 @@ After changing `target_language` or the system language, restart the language se
 The hover header shows the language code: `Translation → de`. The interface — the hover header,
 error messages, the language server log, and CLI errors — is in English, and in Ukrainian when the
 target language is Ukrainian (`Переклад → uk`).
+
+## Translation cache
+
+Translated paragraphs are kept on disk, so hovering the same comment again — even after restarting
+Zed — does not call the service and spends no quota.
+
+- Location: `$XDG_CACHE_HOME/comment-translate`, otherwise `~/Library/Caches/comment-translate` on
+  macOS and `~/.cache/comment-translate` on Linux. Directories are readable only by you (`700`).
+- Entries are kept for 14 days by default, so that improved translation models eventually
+  translate the comment again. Set `"cache_ttl_days"` (1–365) to change that.
+- The cache is limited to 50 MB; at startup expired entries and then the oldest ones are removed.
+- Each entry is one file named by the SHA-256 of the provider, the source and target language, and
+  the paragraph text, so changing the provider or the language gives a new translation.
+- Only translations from the chosen provider are stored. An answer from a fallback service stays in
+  memory only, so the chosen service translates the paragraph itself once it is available again.
+  Errors are never cached.
+- The original comment text is not stored, but the translations are, in plain text. Set
+  `"cache": false` to keep translations in memory only, and delete the directory to clear the cache.
+- In memory, up to 256 paragraphs are kept per server; the oldest ones are evicted first.
+
+```json
+{
+  "lsp": {
+    "comment-translate": {
+      "initialization_options": {
+        "provider": "deepl",
+        "cache_ttl_days": 30
+      }
+    }
+  }
+}
+```
 
 ## Connecting to Zed
 

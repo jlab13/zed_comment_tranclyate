@@ -80,6 +80,8 @@ def main():
                 "source_language": "uk",
                 "target_language": "uk",
                 "provider": provider,
+                # Тести не торкаються постійного кешу перекладів.
+                "cache": False,
             },
         }, request=True)
         assert result["capabilities"]["hoverProvider"] is True
@@ -236,6 +238,7 @@ def single_hover(binary, options, text):
                     return response.get("result")
 
         uri = "file:///tmp/comment-translate-smoke-single.c"
+        options = {"cache": False, **options}
         send(1, "initialize", {"processId": None, "capabilities": {}, "initializationOptions": options})
         send(None, "initialized", {})
         send(None, "textDocument/didOpen", {"textDocument": {

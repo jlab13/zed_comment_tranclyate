@@ -1,3 +1,4 @@
+use crate::cache::{self, DiskCache};
 use crate::deepl;
 use crate::google;
 use crate::i18n::tr;
@@ -7,7 +8,7 @@ use crate::segments::{self, Segment};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{Arc, PoisonError},
     time::{Duration, Instant},
 };
@@ -67,6 +68,10 @@ pub struct Config {
     pub deepl_key_file: Option<String>,
     pub timeout_seconds: u64,
     pub max_comment_chars: usize,
+    /// Постійний кеш перекладів на диску; `false` вимикає його.
+    pub cache: bool,
+    /// Скільки днів зберігається переклад: сервіси вдосконалюються, тож згодом він оновлюється.
+    pub cache_ttl_days: u64,
 }
 
 impl Default for Config {
@@ -80,6 +85,8 @@ impl Default for Config {
             deepl_key_file: None,
             timeout_seconds: 60,
             max_comment_chars: 4000,
+            cache: true,
+            cache_ttl_days: 14,
         }
     }
 }
@@ -145,6 +152,13 @@ impl Config {
             || !(1..=20000).contains(&self.max_comment_chars)
         {
             return Err("timeout_seconds: 1–300; max_comment_chars: 1–20000".into());
+        }
+        if !(1..=365).contains(&self.cache_ttl_days) {
+            return Err(tr!(
+                "cache_ttl_days must be between 1 and 365",
+                "cache_ttl_days має бути в межах 1–365"
+            )
+            .into());
         }
         Ok(())
     }
@@ -242,7 +256,14 @@ fn explicit_target(value: Option<&str>) -> Result<Option<String>, String> {
 
 #[tower_lsp::async_trait]
 trait Engine: Send + Sync {
-    async fn translate(&self, text: &str, config: &Config, target: &str) -> Result<String, String>;
+    async fn translate(&self, text: &str, config: &Config, target: &str) -> Result<Reply, String>;
+}
+
+/// Переклад і чи дав його основний провайдер, а не запасний рушій.
+#[derive(Debug, PartialEq)]
+struct Reply {
+    text: String,
+    primary: bool,
 }
 
 /// Скільки пропускати сервіс після ліміту, вичерпаної квоти чи відхиленого ключа.
@@ -314,9 +335,13 @@ fn throttled(provider: Provider, error: &str) -> bool {
 
 #[tower_lsp::async_trait]
 impl Engine for ProviderEngine {
-    async fn translate(&self, text: &str, config: &Config, target: &str) -> Result<String, String> {
+    async fn translate(&self, text: &str, config: &Config, target: &str) -> Result<Reply, String> {
         if same_language(&config.source_language, target) {
-            return Ok(text.to_owned());
+            // Текст без перекладу нема сенсу зберігати на диску.
+            return Ok(Reply {
+                text: text.to_owned(),
+                primary: false,
+            });
         }
         let chain = config.chain();
         if chain.is_empty() {
@@ -340,7 +365,12 @@ impl Engine for ProviderEngine {
                 continue;
             }
             match self.call(provider, text, config, target, share).await {
-                Ok(translation) => return Ok(translation),
+                Ok(translation) => {
+                    return Ok(Reply {
+                        text: translation,
+                        primary: index == 0,
+                    })
+                }
                 Err(error) => {
                     if throttled(provider, &error) {
                         self.pause(provider);
@@ -368,22 +398,70 @@ pub struct Translator {
     config: Config,
     target: TargetLanguage,
     engine: Arc<dyn Engine>,
-    cache: Mutex<HashMap<String, String>>,
+    cache: Mutex<MemoryCache>,
+    /// Постійний кеш на диску; `None`, якщо він вимкнений або сервіс не вибрано.
+    disk: Option<DiskCache>,
     // Серіалізуємо переклади; повторний hover отримує результат із кешу.
     gate: Mutex<()>,
+}
+
+/// Кеш у пам’яті на 256 абзаців; після заповнення витісняються найдавніші записи.
+#[derive(Default)]
+struct MemoryCache {
+    entries: HashMap<String, String>,
+    order: VecDeque<String>,
+}
+
+impl MemoryCache {
+    const CAPACITY: usize = 256;
+
+    fn get(&self, text: &str) -> Option<String> {
+        self.entries.get(text).cloned()
+    }
+
+    fn insert(&mut self, text: &str, translation: &str) {
+        if self
+            .entries
+            .insert(text.to_owned(), translation.to_owned())
+            .is_none()
+        {
+            self.order.push_back(text.to_owned());
+        }
+        while self.order.len() > Self::CAPACITY {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            }
+        }
+    }
 }
 
 impl Translator {
     pub fn new(config: Config, target: TargetLanguage) -> Self {
         // Ключ DeepL читається один раз під час запуску; після зміни файлу перезапустіть сервер.
         let engine = Arc::new(ProviderEngine::new(config.deepl_key()));
+        let disk = (config.cache && config.configured())
+            .then(|| cache::default_dir(|name| std::env::var(name).ok()))
+            .flatten()
+            .map(|root| {
+                let ttl = Duration::from_secs(config.cache_ttl_days * 24 * 60 * 60);
+                DiskCache::new(root, ttl)
+            });
+        if let Some(disk) = &disk {
+            disk.prune_in_background();
+        }
         Self {
             config,
             target,
             engine,
-            cache: Mutex::new(HashMap::new()),
+            cache: Mutex::new(MemoryCache::default()),
+            disk,
             gate: Mutex::new(()),
         }
+    }
+
+    /// Каталог постійного кешу, якщо він увімкнений.
+    pub fn cache_dir(&self) -> Option<&std::path::Path> {
+        self.disk.as_ref().map(DiskCache::root)
     }
 
     pub fn target(&self) -> &TargetLanguage {
@@ -438,30 +516,52 @@ impl Translator {
 
     // Кожен шматок прози кешується окремо: однаковий абзац не перекладається вдруге.
     async fn translate_prose(&self, text: &str) -> Result<String, String> {
-        if let Some(cached) = self.cache.lock().await.get(text).cloned() {
+        if let Some(cached) = self.cache.lock().await.get(text) {
             return Ok(cached);
         }
-        let translated = match segments::mask(text) {
-            Some(masked) if masked.only_code() => text.to_owned(),
+        let disk_key = self.disk.as_ref().map(|disk| {
+            let provider = self.config.provider.map_or("none", Provider::id);
+            let key = cache::key(
+                provider,
+                &self.config.source_language,
+                &self.target.code,
+                text,
+            );
+            (disk, key)
+        });
+        if let Some(stored) = disk_key.as_ref().and_then(|(disk, key)| disk.get(key)) {
+            self.cache.lock().await.insert(text, &stored);
+            return Ok(stored);
+        }
+        let reply = match segments::mask(text) {
+            Some(masked) if masked.only_code() => Reply {
+                text: text.to_owned(),
+                primary: false,
+            },
             Some(masked) if masked.has_code() => {
                 let reply = self.engine_translate(&masked.text).await?;
-                match masked.restore(&reply) {
-                    Some(restored) => restored,
+                match masked.restore(&reply.text) {
+                    Some(restored) => Reply {
+                        text: restored,
+                        primary: reply.primary,
+                    },
                     // Перекладач зіпсував мітки: перекладаємо текст без приховування коду.
                     None => self.engine_translate(text).await?,
                 }
             }
             _ => self.engine_translate(text).await?,
         };
-        let mut cache = self.cache.lock().await;
-        if cache.len() >= 256 {
-            cache.clear();
+        // Відповідь запасного рушія лишається лише в пам’яті: основний сервіс згодом перекладе сам.
+        if reply.primary {
+            if let Some((disk, key)) = &disk_key {
+                disk.put(key, &reply.text);
+            }
         }
-        cache.insert(text.to_owned(), translated.clone());
-        Ok(translated)
+        self.cache.lock().await.insert(text, &reply.text);
+        Ok(reply.text)
     }
 
-    async fn engine_translate(&self, text: &str) -> Result<String, String> {
+    async fn engine_translate(&self, text: &str) -> Result<Reply, String> {
         self.engine
             .translate(text, &self.config, &self.target.code)
             .await
@@ -600,13 +700,16 @@ mod tests {
 
     #[tower_lsp::async_trait]
     impl Engine for MockEngine {
-        async fn translate(&self, _: &str, _: &Config, _: &str) -> Result<String, String> {
+        async fn translate(&self, _: &str, _: &Config, _: &str) -> Result<Reply, String> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             tokio::time::sleep(self.delay).await;
             if self.fail {
                 Err("Моделі не готові".into())
             } else {
-                Ok("Переклад".into())
+                Ok(Reply {
+                    text: "Переклад".into(),
+                    primary: true,
+                })
             }
         }
     }
@@ -615,20 +718,32 @@ mod tests {
     struct RecordingEngine {
         requests: std::sync::Mutex<Vec<String>>,
         reply: fn(&str) -> String,
+        primary: bool,
     }
 
     #[tower_lsp::async_trait]
     impl Engine for RecordingEngine {
-        async fn translate(&self, text: &str, _: &Config, _: &str) -> Result<String, String> {
+        async fn translate(&self, text: &str, _: &Config, _: &str) -> Result<Reply, String> {
             self.requests.lock().unwrap().push(text.to_owned());
-            Ok((self.reply)(text))
+            Ok(Reply {
+                text: (self.reply)(text),
+                primary: self.primary,
+            })
         }
     }
 
     fn recording(reply: fn(&str) -> String) -> (Translator, Arc<RecordingEngine>) {
+        recording_from(reply, true)
+    }
+
+    fn recording_from(
+        reply: fn(&str) -> String,
+        primary: bool,
+    ) -> (Translator, Arc<RecordingEngine>) {
         let engine = Arc::new(RecordingEngine {
             requests: std::sync::Mutex::new(Vec::new()),
             reply,
+            primary,
         });
         let mut translator = Translator::new(Config::default(), TargetLanguage::fallback());
         translator.engine = engine.clone();
@@ -818,6 +933,97 @@ mod tests {
         assert_eq!(engine.requests.lock().unwrap().len(), 2);
     }
 
+    fn with_disk(translator: &mut Translator, dir: &std::path::Path) {
+        let ttl = Duration::from_secs(14 * 24 * 60 * 60);
+        translator.disk = Some(DiskCache::new(dir.to_path_buf(), ttl));
+    }
+
+    #[tokio::test]
+    async fn primary_translations_survive_a_restart() {
+        let dir = crate::cache::tests::TempDir::new("restart");
+        let (mut first, engine) = recording(fake_ukrainian);
+        with_disk(&mut first, &dir.0);
+        assert_eq!(
+            first.translate("Return the value.").await.unwrap(),
+            "Повернути значення."
+        );
+        assert_eq!(engine.requests.lock().unwrap().len(), 1);
+        // Новий процес сервера: кеш у пам’яті порожній, каталог на диску той самий.
+        let (mut second, engine) = recording(|_| panic!("переклад має прийти з диска"));
+        with_disk(&mut second, &dir.0);
+        assert_eq!(
+            second.translate("Return the value.").await.unwrap(),
+            "Повернути значення."
+        );
+        assert!(engine.requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn fallback_translations_are_not_written_to_disk() {
+        let dir = crate::cache::tests::TempDir::new("fallback");
+        let (mut first, _) = recording_from(fake_ukrainian, false);
+        with_disk(&mut first, &dir.0);
+        first.translate("Return the value.").await.unwrap();
+        let (mut second, engine) = recording(fake_ukrainian);
+        with_disk(&mut second, &dir.0);
+        second.translate("Return the value.").await.unwrap();
+        assert_eq!(engine.requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn disk_entries_depend_on_the_target_language() {
+        let dir = crate::cache::tests::TempDir::new("target");
+        let (mut ukrainian, _) = recording(fake_ukrainian);
+        with_disk(&mut ukrainian, &dir.0);
+        ukrainian.translate("Done.").await.unwrap();
+        let (mut german, engine) = recording(|text| text.replace("Done", "Fertig"));
+        german.target = TargetLanguage {
+            code: "de".into(),
+            origin: String::new(),
+        };
+        with_disk(&mut german, &dir.0);
+        assert_eq!(german.translate("Done.").await.unwrap(), "Fertig.");
+        assert_eq!(engine.requests.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn memory_cache_evicts_oldest_entries_instead_of_clearing() {
+        let mut cache = MemoryCache::default();
+        for index in 0..=MemoryCache::CAPACITY {
+            cache.insert(&index.to_string(), "x");
+        }
+        assert_eq!(cache.get("0"), None);
+        assert_eq!(cache.get("1").as_deref(), Some("x"));
+        assert_eq!(cache.entries.len(), MemoryCache::CAPACITY);
+        cache.insert("1", "y");
+        assert_eq!(cache.order.len(), MemoryCache::CAPACITY);
+    }
+
+    #[test]
+    fn disk_cache_is_on_for_two_weeks_by_default() {
+        let config: Config = serde_json::from_str("{}").unwrap();
+        assert!(config.cache);
+        assert_eq!(config.cache_ttl_days, 14);
+        for days in [0, 366] {
+            let config = Config {
+                cache_ttl_days: days,
+                ..Config::default()
+            };
+            assert!(config.validate().unwrap_err().contains("cache_ttl_days"));
+        }
+        // Без вибраного сервісу чи з вимкненим кешем каталог на диску не використовується.
+        let none = Translator::new(Config::default(), TargetLanguage::fallback());
+        assert!(none.cache_dir().is_none());
+        let off = Config {
+            provider: Some(Provider::Google),
+            cache: false,
+            ..Config::default()
+        };
+        assert!(Translator::new(off, TargetLanguage::fallback())
+            .cache_dir()
+            .is_none());
+    }
+
     #[test]
     fn validates_target_language() {
         for target in ["uk", "DE_at", "zh-Hant", "auto", " AUTO "] {
@@ -880,11 +1086,15 @@ mod tests {
             source_language: "de".into(),
             ..Config::default()
         };
-        let text = ProviderEngine::new(None)
+        let reply = ProviderEngine::new(None)
             .translate("Der Wert 😀", &config, "de-AT")
             .await
             .unwrap();
-        assert_eq!(text, "Der Wert 😀");
+        assert_eq!(reply.text, "Der Wert 😀");
+        assert!(
+            !reply.primary,
+            "текст без перекладу не зберігається на диску"
+        );
     }
 
     #[tokio::test]

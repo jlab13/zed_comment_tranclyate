@@ -1,3 +1,4 @@
+mod cache;
 mod comments;
 mod deepl;
 mod google;
@@ -82,7 +83,33 @@ impl LanguageServer for Backend {
             }
             None => {}
         }
-        *self.translator.write().await = Arc::new(Translator::new(config, target));
+        let (configured, cache_enabled, ttl_days) =
+            (config.configured(), config.cache, config.cache_ttl_days);
+        let translator = Arc::new(Translator::new(config, target));
+        if configured {
+            let message = match translator.cache_dir() {
+                Some(dir) => tr!(
+                    format!(
+                        "Translation cache: {} (entries are kept for {ttl_days} days)",
+                        dir.display()
+                    ),
+                    format!(
+                        "Кеш перекладів: {} (строк зберігання — {ttl_days} дн.)",
+                        dir.display()
+                    )
+                ),
+                None if cache_enabled => tr!(
+                    "Translation cache is unavailable: no cache directory was found.".to_owned(),
+                    "Кеш перекладів недоступний: не знайдено каталог кешу.".to_owned()
+                ),
+                None => tr!(
+                    "Translation cache is off.".to_owned(),
+                    "Кеш перекладів вимкнено.".to_owned()
+                ),
+            };
+            self.client.log_message(MessageType::INFO, message).await;
+        }
+        *self.translator.write().await = translator;
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
