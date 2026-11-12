@@ -1,6 +1,6 @@
 id = "comment-translate-lsp"
 name = "Comment Translation"
-version = "0.1.1"
+version = "0.1.2"
 schema_version = 1
 authors = ["jlab13"]
 description = "Translate code comments into your language in the hover popup."

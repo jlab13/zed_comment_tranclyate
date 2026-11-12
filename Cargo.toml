@@ -1,6 +1,6 @@
 [package]
 name = "comment-translate"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 publish = false
 # examples/ містить налаштування Zed і демо-файли, а не приклади Cargo.
