@@ -2,6 +2,7 @@ use crate::google;
 use crate::locale::{self, TargetLanguage};
 #[cfg(all(target_os = "macos", feature = "apple"))]
 use crate::native;
+use crate::segments::{self, Segment};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -170,29 +171,66 @@ impl Translator {
         &self.target
     }
 
+    /// Перекладає прозу коментаря; блоки коду повертаються без змін і не надсилаються перекладачу.
     pub async fn translate(&self, text: &str) -> Result<String, String> {
         if text.chars().count() > self.config.max_comment_chars {
             return Err("Коментар перевищує max_comment_chars; переклад не запитувався".into());
         }
         let operation = async {
             let _guard = self.gate.lock().await;
-            if let Some(cached) = self.cache.lock().await.get(text).cloned() {
-                return Ok(cached);
+            let mut result = String::with_capacity(text.len());
+            for segment in segments::split(text) {
+                match segment {
+                    Segment::Code(code) => result.push_str(code),
+                    Segment::Prose(prose) => {
+                        let core = prose.trim();
+                        if core.is_empty() {
+                            result.push_str(prose);
+                            continue;
+                        }
+                        // Переноси навколо абзацу відокремлюють його від блоків коду.
+                        result.push_str(&prose[..prose.len() - prose.trim_start().len()]);
+                        result.push_str(&self.translate_prose(core).await?);
+                        result.push_str(&prose[prose.trim_end().len()..]);
+                    }
+                }
             }
-            let translated = self
-                .engine
-                .translate(text, &self.config, &self.target.code)
-                .await?;
-            let mut cache = self.cache.lock().await;
-            if cache.len() >= 256 {
-                cache.clear();
-            }
-            cache.insert(text.to_owned(), translated.clone());
-            Ok(translated)
+            Ok(result)
         };
         timeout(Duration::from_secs(self.config.timeout_seconds), operation)
             .await
             .map_err(|_| format!("Час очікування {} минув", self.config.provider.name()))?
+    }
+
+    // Кожен шматок прози кешується окремо: однаковий абзац не перекладається вдруге.
+    async fn translate_prose(&self, text: &str) -> Result<String, String> {
+        if let Some(cached) = self.cache.lock().await.get(text).cloned() {
+            return Ok(cached);
+        }
+        let translated = match segments::mask(text) {
+            Some(masked) if masked.only_code() => text.to_owned(),
+            Some(masked) if masked.has_code() => {
+                let reply = self.engine_translate(&masked.text).await?;
+                match masked.restore(&reply) {
+                    Some(restored) => restored,
+                    // Перекладач зіпсував мітки: перекладаємо текст без приховування коду.
+                    None => self.engine_translate(text).await?,
+                }
+            }
+            _ => self.engine_translate(text).await?,
+        };
+        let mut cache = self.cache.lock().await;
+        if cache.len() >= 256 {
+            cache.clear();
+        }
+        cache.insert(text.to_owned(), translated.clone());
+        Ok(translated)
+    }
+
+    async fn engine_translate(&self, text: &str) -> Result<String, String> {
+        self.engine
+            .translate(text, &self.config, &self.target.code)
+            .await
     }
 }
 
@@ -306,6 +344,38 @@ mod tests {
                 Ok("Переклад".into())
             }
         }
+    }
+
+    // Записує кожен запит і відповідає функцією `reply`.
+    struct RecordingEngine {
+        requests: std::sync::Mutex<Vec<String>>,
+        reply: fn(&str) -> String,
+    }
+
+    #[tower_lsp::async_trait]
+    impl Engine for RecordingEngine {
+        async fn translate(&self, text: &str, _: &Config, _: &str) -> Result<String, String> {
+            self.requests.lock().unwrap().push(text.to_owned());
+            Ok((self.reply)(text))
+        }
+    }
+
+    fn recording(reply: fn(&str) -> String) -> (Translator, Arc<RecordingEngine>) {
+        let engine = Arc::new(RecordingEngine {
+            requests: std::sync::Mutex::new(Vec::new()),
+            reply,
+        });
+        let mut translator = Translator::new(Config::default(), TargetLanguage::fallback());
+        translator.engine = engine.clone();
+        (translator, engine)
+    }
+
+    // Імітує переклад, що зберігає мітки: лише замінює англійські слова.
+    fn fake_ukrainian(text: &str) -> String {
+        text.replace("Call", "Викличте")
+            .replace("Return the value", "Повернути значення")
+            .replace("and", "і")
+            .replace("Done", "Готово")
     }
 
     fn mock(fail: bool, delay: Duration) -> (Translator, Arc<MockEngine>) {
@@ -430,6 +500,68 @@ mod tests {
         assert_eq!(value["provider"], "google");
         assert_eq!(value["translation"], "Текст 😀");
         assert_eq!(value["target_language"], "uk");
+    }
+
+    #[tokio::test]
+    async fn code_blocks_are_never_sent_and_are_kept_verbatim() {
+        let (translator, engine) = recording(fake_ukrainian);
+        let text = "Return the value.\n\n```\nlet value = next_value(1);\n```\nDone.";
+        assert_eq!(
+            translator.translate(text).await.unwrap(),
+            "Повернути значення.\n\n```\nlet value = next_value(1);\n```\nГотово."
+        );
+        assert_eq!(
+            *engine.requests.lock().unwrap(),
+            ["Return the value.", "Done."]
+        );
+    }
+
+    #[tokio::test]
+    async fn inline_code_is_masked_and_restored() {
+        let (translator, engine) = recording(fake_ukrainian);
+        assert_eq!(
+            translator
+                .translate("Call next_value() and `MAX_SIZE`.")
+                .await
+                .unwrap(),
+            "Викличте next_value() і `MAX_SIZE`."
+        );
+        assert_eq!(*engine.requests.lock().unwrap(), ["Call x0_ and x1_."]);
+    }
+
+    #[tokio::test]
+    async fn broken_labels_fall_back_to_unmasked_text() {
+        let (translator, engine) = recording(|text| text.replace("x0_", "x 0"));
+        assert_eq!(
+            translator.translate("Call next_value().").await.unwrap(),
+            "Call next_value()."
+        );
+        assert_eq!(
+            *engine.requests.lock().unwrap(),
+            ["Call x0_.", "Call next_value()."]
+        );
+    }
+
+    #[tokio::test]
+    async fn code_only_prose_is_not_sent() {
+        let (translator, engine) = recording(fake_ukrainian);
+        let text = "next_value()\n\n```\ncode\n```";
+        assert_eq!(translator.translate(text).await.unwrap(), text);
+        assert!(engine.requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn each_paragraph_is_cached_separately() {
+        let (translator, engine) = recording(fake_ukrainian);
+        translator
+            .translate("Return the value.\n```\na\n```\nDone.")
+            .await
+            .unwrap();
+        translator
+            .translate("Done.\n```\nb\n```\nReturn the value.")
+            .await
+            .unwrap();
+        assert_eq!(engine.requests.lock().unwrap().len(), 2);
     }
 
     #[test]

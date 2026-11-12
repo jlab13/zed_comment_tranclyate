@@ -29,6 +29,7 @@ Zed → WASM extension → Rust LSP → Google Translate (Rust, all platforms)
 - `src/lib.rs` — the Zed extension that launches the server.
 - `server/src/` — the LSP, comment detection, UTF-16 positions, and the cache.
 - `server/src/languages.rs` — the language table: languageId, file extensions, grammar, and markers.
+- `server/src/segments.rs` — code protection: splitting into prose and code blocks, labels for inline code.
 - `server/src/locale.rs` — resolves the target language from the system locale.
 - `server/src/google.rs` — the shared Google HTTP client built on reqwest/rustls.
 - `native/` — the Swift Apple translator, strategy selection, and the C-compatible bridge.
@@ -241,6 +242,28 @@ Linux CI runs these checks, builds the server and WASM, and checks the CLI and L
 Regular tests need neither internet access nor language models. Real translation needs
 ready Apple models or access to Google.
 
+## Code protection
+
+The translator receives only prose; code never reaches it.
+
+- **Code blocks** — Markdown fences (```` ``` ````, `~~~`), Doxygen `@code … @endcode`,
+  `\code … \endcode`, and `@verbatim … @endverbatim`, and Python doctest examples (`>>>`
+  up to the next blank line) — are shown verbatim and never sent for translation. The prose
+  paragraphs around them are translated and cached separately.
+- **Code inside sentences** is replaced with `x0_`, `x1_`, … labels before translation and put
+  back afterwards: inline code in backticks, identifiers that look like code (`next_value()`,
+  `MAX_SIZE`, `nextValue`, `HashMap`, `std::mem::swap`, `node->next`), URLs, Doxygen commands
+  with parameter names (`@param[in] node`), and reST fields (`:param count:`). Ordinary words,
+  `item(s)`, and email addresses are not touched. Identifier-like labels keep the context:
+  Google translates "Call x0_" as a function call, while with `⟦0⟧` it chose a phone call.
+- **If the translator loses, changes, or repeats a label**, the paragraph is translated again
+  without labels, as before. A paragraph with no words outside code is not sent at all.
+
+Documentation comments in Rust, Swift, and Dart (`///`, `//!`, `/** */`, `/*! */`) are written in
+Markdown, so their hover is shown as Markdown: code blocks get syntax highlighting (an untagged
+block gets the document language), and line breaks are kept. Regular comments and other languages
+are shown as plain text, so `*` and `_` in them are never turned into formatting.
+
 ## Limitations
 
 C, C++, Rust, Python, Shell Script, Swift, and Dart are supported on macOS and Linux;
@@ -253,8 +276,8 @@ lines within a paragraph are joined with spaces; paragraph boundaries are kept a
 List items (`1.`, `1)`, `-`, `*`, `+`, `•`) and Doxygen tags (`@brief`, `@param`,
 `@return`, also the `\param` form) stay on separate lines. A wrapped item description is
 joined with spaces, and the indentation of nested items is preserved. Markdown headings
-(`# Examples`) stay on separate lines, and code blocks fenced with ```` ``` ```` or `~~~`
-are passed through verbatim, without joining lines. In nested Rust, Swift, and Dart comments,
+(`# Examples`) and reST fields (`:param x:`) stay on separate lines; code blocks are kept
+verbatim (see [Code protection](#code-protection)). In nested Rust, Swift, and Dart comments,
 only the outer `/*` and `*/` are removed. A Python docstring is only the first string literal
 of a module, class, or function without an `f`/`b`/`t` prefix; quotes and `r`/`u` prefixes are
 removed, and indentation is normalized as in `inspect.cleandoc`. Other strings, f-strings,

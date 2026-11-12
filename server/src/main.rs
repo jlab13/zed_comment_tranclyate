@@ -4,6 +4,7 @@ mod languages;
 mod locale;
 #[cfg(all(target_os = "macos", feature = "apple"))]
 mod native;
+mod segments;
 mod text;
 mod translate;
 
@@ -98,7 +99,7 @@ impl LanguageServer for Backend {
 
     async fn hover(&self, params: HoverParams) -> jsonrpc::Result<Option<Hover>> {
         let target = params.text_document_position_params;
-        let (version, comment) = {
+        let (version, comment, markdown) = {
             let documents = self.documents.read().await;
             let Some((version, source, language)) = documents.get(&target.text_document.uri) else {
                 return Ok(None);
@@ -106,14 +107,28 @@ impl LanguageServer for Backend {
             let Some(comment) = comments::at(source, target.position, language) else {
                 return Ok(None);
             };
-            (*version, comment)
+            // Документацію Rust, Swift і Dart пишуть у Markdown; звичайні коментарі — ні.
+            let markdown = language.markdown_fence.filter(|_| comment.doc);
+            (*version, comment, markdown)
         };
         let translator = self.translator.read().await.clone();
-        let value = match translator.translate(&comment.text).await {
-            Ok(text) => format!("Переклад → {}\n\n{text}", translator.target().code),
+        let (kind, value) = match translator.translate(&comment.text).await {
+            Ok(text) => {
+                let header = format!("Переклад → {}", translator.target().code);
+                match markdown {
+                    Some(fence) => (
+                        MarkupKind::Markdown,
+                        format!("{header}\n\n{}", text::markdown(&text, fence)),
+                    ),
+                    None => (MarkupKind::PlainText, format!("{header}\n\n{text}")),
+                }
+            }
             Err(error) => {
                 self.client.log_message(MessageType::WARNING, &error).await;
-                format!("Переклад недоступний\n\n{error}")
+                (
+                    MarkupKind::PlainText,
+                    format!("Переклад недоступний\n\n{error}"),
+                )
             }
         };
         // Не показуємо переклад зі старими координатами після редагування.
@@ -128,10 +143,7 @@ impl LanguageServer for Backend {
             return Ok(None);
         }
         Ok(Some(Hover {
-            contents: HoverContents::Markup(MarkupContent {
-                kind: MarkupKind::PlainText,
-                value,
-            }),
+            contents: HoverContents::Markup(MarkupContent { kind, value }),
             range: Some(comment.range),
         }))
     }

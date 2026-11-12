@@ -1,4 +1,5 @@
 use crate::languages::LanguageSpec;
+use crate::segments::CodeBlock;
 
 // LSP використовує UTF-16, а Tree-sitter — байтові зміщення UTF-8.
 pub fn byte_offset(source: &str, line_number: u32, character: u32) -> Option<usize> {
@@ -169,6 +170,10 @@ fn structured_line(line: &str) -> bool {
     if let Some(tail) = line.strip_prefix(['@', '\\']) {
         return tail.starts_with(|ch: char| ch.is_ascii_alphabetic());
     }
+    // Поле reST у docstring Python: `:param name:`, `:returns:`.
+    if let Some(tail) = line.strip_prefix(':') {
+        return tail.starts_with(|ch: char| ch.is_ascii_alphabetic()) && tail.contains(':');
+    }
     let digits = line.bytes().take_while(u8::is_ascii_digit).count();
     digits > 0
         && line[digits..]
@@ -186,39 +191,37 @@ fn heading(line: &str) -> bool {
             .is_none_or(char::is_whitespace)
 }
 
-// Огородження блоку коду Markdown (```` ``` ```` або `~~~`).
-fn code_fence(line: &str) -> Option<&'static str> {
-    ["```", "~~~"]
-        .into_iter()
-        .find(|marker| line.starts_with(marker))
-}
-
 // З’єднуємо перенесений текст, але зберігаємо абзаци, пункти списків, Doxygen-теги,
-// заголовки Markdown і блоки коду.
+// заголовки Markdown і блоки коду (Markdown, Doxygen `@code`, doctest Python).
 pub fn paragraphs(text: &str) -> String {
     let mut result = String::new();
     let mut paragraph_break = false;
     // Після заголовка чи блоку коду наступний рядок не приєднується до попереднього.
     let mut line_break = false;
-    let mut fence = None;
+    let mut block: Option<CodeBlock> = None;
     for line in text.lines() {
         let trimmed = line.trim();
-        if let Some(marker) = fence {
-            // Код усередині огородження залишаємо дослівно, разом із порожніми рядками.
-            result.push('\n');
-            result.push_str(line.trim_end());
-            if trimmed.starts_with(marker) {
-                fence = None;
+        if let Some(current) = block {
+            if current.ends_before(trimmed) {
+                block = None;
                 line_break = true;
+            } else {
+                // Код усередині блоку залишаємо дослівно, разом із порожніми рядками.
+                result.push('\n');
+                result.push_str(line.trim_end());
+                if current.ends_with(trimmed) {
+                    block = None;
+                    line_break = true;
+                }
+                continue;
             }
-            continue;
         }
         if trimmed.is_empty() {
             paragraph_break = !result.is_empty();
             continue;
         }
-        fence = code_fence(trimmed);
-        let standalone = fence.is_some() || heading(trimmed);
+        block = CodeBlock::start(trimmed);
+        let standalone = block.is_some() || heading(trimmed);
         let structured = standalone || structured_line(trimmed);
         if !result.is_empty() {
             result.push_str(if paragraph_break {
@@ -235,6 +238,42 @@ pub fn paragraphs(text: &str) -> String {
     }
     // Незакритий блок коду може закінчуватися порожніми рядками.
     result.truncate(result.trim_end().len());
+    result
+}
+
+/// Готує документаційний коментар до показу як Markdown: кожен перенос рядка поза
+/// блоками коду стає жорстким, а блок коду без мови отримує мову документа.
+pub fn markdown(text: &str, language: &str) -> String {
+    let lines: Vec<_> = text.lines().collect();
+    let mut result = String::with_capacity(text.len() + language.len());
+    let mut fence: Option<&str> = None;
+    for (index, line) in lines.iter().enumerate() {
+        if index > 0 {
+            result.push('\n');
+        }
+        result.push_str(line);
+        let trimmed = line.trim();
+        if let Some(marker) = fence {
+            if trimmed.starts_with(marker) {
+                fence = None;
+            }
+            continue;
+        }
+        if let Some(marker) = ["```", "~~~"].into_iter().find(|m| trimmed.starts_with(m)) {
+            fence = Some(marker);
+            if trimmed == marker {
+                result.push_str(language);
+            }
+            continue;
+        }
+        // `paragraphs` уже з’єднав перенесені рядки, тож решта переносів навмисні.
+        let next_is_text = lines
+            .get(index + 1)
+            .is_some_and(|next| !next.trim().is_empty());
+        if !trimmed.is_empty() && next_is_text {
+            result.push_str("  ");
+        }
+    }
     result
 }
 
@@ -454,5 +493,36 @@ mod tests {
             "Text ####### seven",
             "більше шести # — не заголовок"
         );
+    }
+
+    #[test]
+    fn doxygen_code_and_doctest_blocks_are_kept_verbatim() {
+        let text = "Example:\n@code{.c}\nint x = next(1);\n\n  return x;\n@endcode\nwraps\ntext.\n>>> add(1,\n...     2)\n3\n\nAfter\ndoctest.";
+        assert_eq!(
+            paragraphs(text),
+            "Example:\n@code{.c}\nint x = next(1);\n\n  return x;\n@endcode\nwraps text.\n>>> add(1,\n...     2)\n3\n\nAfter doctest."
+        );
+    }
+
+    #[test]
+    fn restructured_text_fields_stay_on_separate_lines() {
+        assert_eq!(
+            paragraphs("Add numbers.\n\n:param a: The first\n    value.\n:returns: The sum."),
+            "Add numbers.\n\n:param a: The first value.\n:returns: The sum."
+        );
+        assert_eq!(
+            paragraphs("Ratio\n:1 is not a field."),
+            "Ratio :1 is not a field."
+        );
+    }
+
+    #[test]
+    fn markdown_uses_hard_breaks_and_document_language_for_code() {
+        let text = "@brief Init.\n@param x Value.\n\n# Examples\n```\nlet a = 1;\nlet b = 2;\n```\n```text\nraw\n```";
+        assert_eq!(
+            markdown(text, "rust"),
+            "@brief Init.  \n@param x Value.\n\n# Examples  \n```rust\nlet a = 1;\nlet b = 2;\n```\n```text\nraw\n```"
+        );
+        assert_eq!(markdown("One line.", "rust"), "One line.");
     }
 }

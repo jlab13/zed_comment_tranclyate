@@ -6,6 +6,8 @@ use tree_sitter::Node;
 pub struct Comment {
     pub text: String,
     pub range: Range,
+    /// Документаційний коментар або docstring, а не звичайний коментар.
+    pub doc: bool,
 }
 
 pub fn at(source: &str, cursor: Position, language: &LanguageSpec) -> Option<Comment> {
@@ -21,10 +23,16 @@ pub fn at(source: &str, cursor: Position, language: &LanguageSpec) -> Option<Com
     if offset >= comment_end(source, node) {
         return None;
     }
-    let (first, last, text) = if is_comment(source, node, language) {
-        comment_group(source, root, node, language)
+    let (first, last, text, doc) = if is_comment(source, node, language) {
+        let (first, last, text) = comment_group(source, root, node, language);
+        (
+            first,
+            last,
+            text,
+            documentation(comment_text(source, first)),
+        )
     } else {
-        (node, node, docstring_text(source, node))
+        (node, node, docstring_text(source, node), true)
     };
     let text = paragraphs(&text);
     if text.is_empty() {
@@ -38,7 +46,16 @@ pub fn at(source: &str, cursor: Position, language: &LanguageSpec) -> Option<Com
             Position::new(start_line, start_column),
             Position::new(end_line, end_column),
         ),
+        doc,
     })
+}
+
+// Документаційний коментар: `///`, `//!`, `/** */`, `/*! */`, але не `////` чи порожній `/**/`.
+fn documentation(raw: &str) -> bool {
+    (raw.starts_with("///") && !raw.starts_with("////"))
+        || raw.starts_with("//!")
+        || (raw.starts_with("/**") && !raw.starts_with("/**/"))
+        || raw.starts_with("/*!")
 }
 
 // Повертає перший і останній коментар групи та очищений текст усіх рядків.
@@ -440,6 +457,32 @@ mod tests {
             );
         }
         assert!(text_in(&RUST, source, 3, 5).is_none());
+    }
+
+    #[test]
+    fn distinguishes_documentation_from_plain_comments() {
+        let doc = |language: &LanguageSpec, source: &str, line: u32, column: u32| {
+            super::at(source, Position::new(line, column), language)
+                .unwrap()
+                .doc
+        };
+        let rust = "//! Crate.\n/// Item.\nfn f() {} // Note.\n/** Block. */\n/*! Inner. */\n/* Plain. */\n//// Banner.\n";
+        for (line, column, expected) in [
+            (0, 5, true),
+            (1, 5, true),
+            (2, 13, false),
+            (3, 5, true),
+            (4, 5, true),
+            (5, 5, false),
+            (6, 6, false),
+        ] {
+            assert_eq!(doc(&RUST, rust, line, column), expected, "рядок {line}");
+        }
+        assert!(doc(&SWIFT, "/// Item.\nlet x = 1\n", 0, 5));
+        assert!(doc(&DART, "/// Item.\nvar x = 1;\n", 0, 5));
+        assert!(!doc(&DART, "// Note.\nvar x = 1;\n", 0, 4));
+        assert!(doc(&PYTHON, "\"\"\"Module.\"\"\"\n", 0, 4));
+        assert!(!doc(&PYTHON, "# Note.\n", 0, 3));
     }
 
     #[test]

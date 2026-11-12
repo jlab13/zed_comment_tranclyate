@@ -158,7 +158,11 @@ def main():
         }, "Діапазон doc-коментаря Rust має закінчуватися до переносу рядка"
         assert hover(3, len(rust_doc)) is None
         assert hover(5, 22) is None, "Сирі рядки Rust не повинні перекладатися"
-        assert "Додати одиницю." in value(hover(6, 20))
+        plain = hover(6, 20)
+        assert "Додати одиницю." in value(plain)
+        assert documentation["contents"]["kind"] == "markdown", "Документація Rust показується як Markdown"
+        assert plain["contents"]["kind"] == "plaintext", "Звичайний коментар Rust показується як текст"
+        assert "Повертає наступне значення.  \nПоточне" not in value(documentation)
         send("textDocument/didClose", {"textDocument": {"uri": uri}})
 
         open_document("comment-translate-smoke.py", "python", (

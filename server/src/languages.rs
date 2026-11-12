@@ -20,6 +20,8 @@ pub struct LanguageSpec {
     pub docstrings: bool,
     /// Чи пропускати shebang (`#!` на початку файлу).
     pub shebang: bool,
+    /// Мова блоків коду в документації Markdown; `None`, якщо документація мови не є Markdown.
+    pub markdown_fence: Option<&'static str>,
 }
 
 const SLASHES: &[&str] = &["//"];
@@ -35,6 +37,7 @@ pub static C: LanguageSpec = LanguageSpec {
     block: C_BLOCK,
     docstrings: false,
     shebang: false,
+    markdown_fence: None,
 };
 
 pub static CPP: LanguageSpec = LanguageSpec {
@@ -50,6 +53,7 @@ pub static CPP: LanguageSpec = LanguageSpec {
     block: C_BLOCK,
     docstrings: false,
     shebang: false,
+    markdown_fence: None,
 };
 
 pub static RUST: LanguageSpec = LanguageSpec {
@@ -62,6 +66,7 @@ pub static RUST: LanguageSpec = LanguageSpec {
     block: C_BLOCK,
     docstrings: false,
     shebang: false,
+    markdown_fence: Some("rust"),
 };
 
 pub static PYTHON: LanguageSpec = LanguageSpec {
@@ -73,6 +78,7 @@ pub static PYTHON: LanguageSpec = LanguageSpec {
     block: None,
     docstrings: true,
     shebang: true,
+    markdown_fence: None,
 };
 
 pub static BASH: LanguageSpec = LanguageSpec {
@@ -104,6 +110,7 @@ pub static BASH: LanguageSpec = LanguageSpec {
     block: None,
     docstrings: false,
     shebang: true,
+    markdown_fence: None,
 };
 
 pub static SWIFT: LanguageSpec = LanguageSpec {
@@ -115,6 +122,7 @@ pub static SWIFT: LanguageSpec = LanguageSpec {
     block: C_BLOCK,
     docstrings: false,
     shebang: false,
+    markdown_fence: Some("swift"),
 };
 
 pub static DART: LanguageSpec = LanguageSpec {
@@ -127,6 +135,7 @@ pub static DART: LanguageSpec = LanguageSpec {
     block: C_BLOCK,
     docstrings: false,
     shebang: false,
+    markdown_fence: Some("dart"),
 };
 
 /// Усі підтримувані мови; C стоїть перед C++, тому `.h` без `languageId` вважається C.
