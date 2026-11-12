@@ -13,10 +13,9 @@ use std::{
 };
 use tokio::{sync::Mutex, time::timeout};
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
-    #[default]
     Google,
     MyMemory,
     DeepL,
@@ -52,7 +51,9 @@ impl Provider {
 #[derive(Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    pub provider: Provider,
+    /// Сервіс перекладу. Без нього коментарі нікуди не надсилаються, а hover пояснює,
+    /// як вибрати сервіс: текст коментаря отримує лише той сервіс, який вибрав користувач.
+    pub provider: Option<Provider>,
     pub source_language: String,
     /// Мова перекладу; відсутнє поле або `auto` означає мову системної локалі.
     pub target_language: Option<String>,
@@ -71,7 +72,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            provider: Provider::default(),
+            provider: None,
             source_language: "auto".into(),
             target_language: None,
             fallback: None,
@@ -128,10 +129,10 @@ impl Config {
             .into());
         }
         explicit_target(self.target_language.as_deref())?;
-        if let Some(fallback) = &self.fallback {
-            for (index, provider) in fallback.iter().enumerate() {
-                if *provider == self.provider || fallback[..index].contains(provider) {
-                    let id = self.provider.id();
+        if let (Some(provider), Some(fallback)) = (self.provider, &self.fallback) {
+            for (index, other) in fallback.iter().enumerate() {
+                if *other == provider || fallback[..index].contains(other) {
+                    let id = provider.id();
                     return Err(tr!(
                         format!("fallback cannot contain the provider itself ({id}) or repeats"),
                         format!("fallback не може містити сам провайдер ({id}) чи повтори")
@@ -148,13 +149,21 @@ impl Config {
         Ok(())
     }
 
-    /// Провайдер і запасні рушії в порядку спроб.
+    /// Чи вибрав користувач сервіс перекладу.
+    pub fn configured(&self) -> bool {
+        self.provider.is_some()
+    }
+
+    /// Провайдер і запасні рушії в порядку спроб; порожньо, доки провайдера не вибрано.
     pub fn chain(&self) -> Vec<Provider> {
+        let Some(provider) = self.provider else {
+            return Vec::new();
+        };
         let fallback = self
             .fallback
             .clone()
-            .unwrap_or_else(|| self.provider.default_fallback());
-        std::iter::once(self.provider).chain(fallback).collect()
+            .unwrap_or_else(|| provider.default_fallback());
+        std::iter::once(provider).chain(fallback).collect()
     }
 
     /// Ключ DeepL, якщо DeepL є серед рушіїв; `Err` пояснює, чому ключа немає.
@@ -310,6 +319,14 @@ impl Engine for ProviderEngine {
             return Ok(text.to_owned());
         }
         let chain = config.chain();
+        if chain.is_empty() {
+            // Hover сюди не доходить, але без провайдера текст точно нікуди не надсилається.
+            return Err(tr!(
+                "No translation provider is selected.",
+                "Провайдера перекладу не вибрано."
+            )
+            .into());
+        }
         // Кожна спроба отримує рівну частку часу, щоб повільний сервіс не з’їв увесь тайм-аут.
         let share = Duration::from_secs(config.timeout_seconds) / chain.len() as u32;
         let mut errors = Vec::new();
@@ -373,6 +390,11 @@ impl Translator {
         &self.target
     }
 
+    /// Чи вибрав користувач сервіс перекладу; без нього hover лише пояснює, як його вибрати.
+    pub fn configured(&self) -> bool {
+        self.config.configured()
+    }
+
     /// Перекладає прозу коментаря; блоки коду повертаються без змін і не надсилаються перекладачу.
     pub async fn translate(&self, text: &str) -> Result<String, String> {
         if text.chars().count() > self.config.max_comment_chars {
@@ -406,7 +428,7 @@ impl Translator {
         timeout(Duration::from_secs(self.config.timeout_seconds), operation)
             .await
             .map_err(|_| {
-                let name = self.config.provider.name();
+                let name = self.config.provider.map_or("LSP", Provider::name);
                 tr!(
                     format!("{name} timed out"),
                     format!("Час очікування {name} минув")
@@ -471,7 +493,8 @@ pub async fn diagnose(input: &str) -> Result<serde_json::Value, String> {
             "Некоректний запит JSON: перевірте text, provider та timeout_seconds"
         )
     })?;
-    let provider = request.provider.unwrap_or_default();
+    // У CLI користувач сам вводить текст для перекладу, тому без поля provider береться Google.
+    let provider = request.provider.unwrap_or(Provider::Google);
     let seconds = request.timeout_seconds.unwrap_or(60);
     if !(1..=300).contains(&seconds) {
         return Err(tr!(
@@ -666,12 +689,15 @@ mod tests {
     }
 
     #[test]
-    fn provider_defaults_to_google_on_all_platforms() {
+    fn no_provider_is_selected_by_default() {
         let default: Config = serde_json::from_str("{}").unwrap();
-        assert_eq!(default.provider, Provider::Google);
+        assert_eq!(default.provider, None);
+        assert!(!default.configured());
+        assert!(default.chain().is_empty());
         let google: Config = serde_json::from_str(r#"{"provider":"google"}"#).unwrap();
-        assert_eq!(google.provider, Provider::Google);
-        assert_eq!(serde_json::to_value(google.provider).unwrap(), "google");
+        assert_eq!(google.provider, Some(Provider::Google));
+        assert!(google.configured());
+        assert_eq!(serde_json::to_value(Provider::Google).unwrap(), "google");
         assert!(serde_json::from_str::<Config>(r#"{"provider":"unknown"}"#).is_err());
     }
 
@@ -880,18 +906,27 @@ mod tests {
     fn default_chains_follow_the_omarchy_plugin_order() {
         use Provider::{DeepL, Google, MyMemory};
         let config = |json: &str| serde_json::from_str::<Config>(json).unwrap();
-        assert_eq!(config("{}").chain(), [Google, MyMemory]);
+        assert!(config("{}").chain().is_empty());
+        assert_eq!(
+            config(r#"{"provider":"google"}"#).chain(),
+            [Google, MyMemory]
+        );
         assert_eq!(
             config(r#"{"provider":"deepl"}"#).chain(),
             [DeepL, Google, MyMemory]
         );
         assert_eq!(config(r#"{"provider":"mymemory"}"#).chain(), [MyMemory]);
         // Попередні значення `"mymemory"` і `"none"` залишаються дійсними.
-        assert_eq!(config(r#"{"fallback":"none"}"#).chain(), [Google]);
         assert_eq!(
-            config(r#"{"fallback":"mymemory"}"#).chain(),
+            config(r#"{"provider":"google","fallback":"none"}"#).chain(),
+            [Google]
+        );
+        assert_eq!(
+            config(r#"{"provider":"google","fallback":"mymemory"}"#).chain(),
             [Google, MyMemory]
         );
+        // Запасні рушії без провайдера нічого не вмикають.
+        assert!(config(r#"{"fallback":["google"]}"#).chain().is_empty());
         assert_eq!(
             config(r#"{"provider":"deepl","fallback":["mymemory"]}"#).chain(),
             [DeepL, MyMemory]
@@ -913,8 +948,8 @@ mod tests {
     #[test]
     fn rejects_fallback_to_itself_or_repeats() {
         for json in [
-            r#"{"fallback":"google"}"#,
-            r#"{"fallback":["mymemory","mymemory"]}"#,
+            r#"{"provider":"google","fallback":"google"}"#,
+            r#"{"provider":"google","fallback":["mymemory","mymemory"]}"#,
             r#"{"provider":"deepl","fallback":["deepl"]}"#,
         ] {
             let config: Config = serde_json::from_str(json).unwrap();
@@ -986,7 +1021,7 @@ mod tests {
     #[tokio::test]
     async fn deepl_without_a_key_fails_without_network() {
         let config = Config {
-            provider: Provider::DeepL,
+            provider: Some(Provider::DeepL),
             fallback: Some(Vec::new()),
             ..Config::default()
         };

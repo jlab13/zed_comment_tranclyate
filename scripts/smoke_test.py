@@ -215,8 +215,8 @@ def main():
         process.stdout.close()
 
 
-def check_english_interface(binary):
-    """Для цільової мови, відмінної від української, інтерфейс англійською."""
+def single_hover(binary, options, text):
+    """Запускає окремий сервер із налаштуваннями options і повертає hover на першому рядку."""
     process = subprocess.Popen([str(binary)], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
     messages = queue.Queue()
     threading.Thread(target=read_messages, args=(process.stdout, messages), daemon=True).start()
@@ -235,19 +235,17 @@ def check_english_interface(binary):
                 if response.get("id") == message_id:
                     return response.get("result")
 
-        uri = "file:///tmp/comment-translate-smoke-en.c"
-        send(1, "initialize", {"processId": None, "capabilities": {},
-                               "initializationOptions": {"source_language": "en", "target_language": "en"}})
+        uri = "file:///tmp/comment-translate-smoke-single.c"
+        send(1, "initialize", {"processId": None, "capabilities": {}, "initializationOptions": options})
         send(None, "initialized", {})
         send(None, "textDocument/didOpen", {"textDocument": {
-            "uri": uri, "languageId": "c", "version": 1, "text": "// Return the value.\n"}})
+            "uri": uri, "languageId": "c", "version": 1, "text": text}})
         result = send(2, "textDocument/hover", {"textDocument": {"uri": uri},
                                                 "position": {"line": 0, "character": 4}})
-        assert result["contents"]["value"] == "Translation → en\n\nReturn the value.", result
         send(3, "shutdown", None)
         send(None, "exit", None)
         assert process.wait(timeout=5) == 0
-        print("LSP smoke test: OK — English interface for a non-Ukrainian target")
+        return result
     finally:
         if process.poll() is None:
             process.kill()
@@ -256,6 +254,28 @@ def check_english_interface(binary):
         process.stdout.close()
 
 
+def check_english_interface(binary):
+    """Для цільової мови, відмінної від української, інтерфейс англійською."""
+    result = single_hover(binary, {"provider": "google", "source_language": "en", "target_language": "en"},
+                          "// Return the value.\n")
+    assert result["contents"]["value"] == "Translation → en\n\nReturn the value.", result
+    print("LSP smoke test: OK — English interface for a non-Ukrainian target")
+
+
+def check_unconfigured_hint(binary):
+    """Без провайдера hover пояснює, як його вибрати, і нічого не перекладає."""
+    for target, title in (("en", "choose a translation provider"), ("uk", "виберіть сервіс перекладу")):
+        result = single_hover(binary, {"target_language": target}, "// Return the value.\n")
+        contents = result["contents"]
+        assert contents["kind"] == "markdown", result
+        assert title in contents["value"] and '"provider"' in contents["value"], result
+        assert "Return the value." not in contents["value"], "Без провайдера коментар не перекладається"
+        assert result["range"]["start"] == {"line": 0, "character": 0}, result
+    print("LSP smoke test: OK — setup hint until a provider is chosen")
+
+
 if __name__ == "__main__":
     main()
-    check_english_interface(Path(sys.argv[1] if len(sys.argv) > 1 else "target/debug/comment-translate-lsp").resolve())
+    smoke_binary = Path(sys.argv[1] if len(sys.argv) > 1 else "target/debug/comment-translate-lsp").resolve()
+    check_english_interface(smoke_binary)
+    check_unconfigured_hint(smoke_binary)

@@ -4,20 +4,21 @@
 
 An extension for **macOS and Linux** that shows a translation of the comment under the cursor
 in Zed's standard hover popup, in the system language (or the language set in `target_language`).
-The default provider on both macOS and Linux is **Google Translate**, which needs no API key;
-when Google does not answer, it falls back to **MyMemory**. **DeepL** works on your own API key.
+You choose the translation service: **Google Translate** (no API key, falls back to **MyMemory**
+when Google does not answer), **MyMemory**, or **DeepL** on your own API key. Until you choose one,
+the hover only explains how to do it, and no comment text leaves your machine.
 Supports **C, C++, Rust, Python, Shell Script (Bash), Swift, and Dart**: line, block,
 and documentation comments, plus Python docstrings. Tree-sitter tells strings, raw strings,
 interpolation, and heredocs apart from comments. The code in the file is never modified.
 
-| Zed language | Comments | Notes |
-| --- | --- | --- |
-| C, C++ | `//`, `///`, `//!`, `/* */`, `/** */`, `/*! */` | `.h` works in both C and C++ mode |
-| Rust | `//`, `///`, `//!`, `/* */`, `/** */`, `/*! */` | nested block comments |
-| Swift | `//`, `///`, `/* */`, `/** */` | nested block comments; the language comes from the Swift extension |
-| Dart | `//`, `///`, `/* */`, `/** */` | nested block comments; the language comes from the Dart extension |
-| Python | `#`, docstrings | a `#!` shebang on the first line is not translated |
-| Shell Script | `#` | a `#!` shebang on the first line is not translated |
+| Zed language | Comments                                        | Notes                                                              |
+| ------------ | ----------------------------------------------- | ------------------------------------------------------------------ |
+| C, C++       | `//`, `///`, `//!`, `/* */`, `/** */`, `/*! */` | `.h` works in both C and C++ mode                                  |
+| Rust         | `//`, `///`, `//!`, `/* */`, `/** */`, `/*! */` | nested block comments                                              |
+| Swift        | `//`, `///`, `/* */`, `/** */`                  | nested block comments; the language comes from the Swift extension |
+| Dart         | `//`, `///`, `/* */`, `/** */`                  | nested block comments; the language comes from the Dart extension  |
+| Python       | `#`, docstrings                                 | a `#!` shebang on the first line is not translated                 |
+| Shell Script | `#`                                             | a `#!` shebang on the first line is not translated                 |
 
 ## Architecture
 
@@ -66,7 +67,8 @@ backend has been removed.
 
 ## Choosing a provider
 
-Without a `provider` field, **Google** is used. For Google, add to your Zed settings:
+No provider is selected by default. Until `provider` is set, hovering a comment shows how to choose
+one, and no comment text is sent anywhere. For Google, add to your Zed settings:
 
 ```json
 {
@@ -103,7 +105,8 @@ echo '{"provider":"google","text":"Return the next counter value.","source_langu
   | ./target/release/comment-translate-lsp --translate
 ```
 
-`--check en` returns `network_required` for the default Google provider; verify access to Google
+The CLI uses Google when the request has no `provider`, since you type the text yourself.
+`--check en` returns `network_required` for Google; verify access to Google
 with a real translation through `--translate` with `"provider":"google"`.
 
 ### MyMemory
@@ -343,7 +346,7 @@ DeepL.
 
 The translator receives only prose; code never reaches it.
 
-- **Code blocks** — Markdown fences (```` ``` ````, `~~~`), Doxygen `@code … @endcode`,
+- **Code blocks** — Markdown fences (` ``` `, `~~~`), Doxygen `@code … @endcode`,
   `\code … \endcode`, and `@verbatim … @endverbatim`, and Python doctest examples (`>>>`
   up to the next blank line) — are shown verbatim and never sent for translation. The prose
   paragraphs around them are translated and cached separately.

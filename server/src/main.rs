@@ -51,15 +51,18 @@ impl LanguageServer for Backend {
             )
             .await;
         let chain: Vec<_> = config.chain().into_iter().map(|p| p.name()).collect();
-        self.client
-            .log_message(
-                MessageType::INFO,
-                tr!(
-                    format!("Translation order: {}", chain.join(" → ")),
-                    format!("Порядок перекладу: {}", chain.join(" → "))
-                ),
+        let message = if chain.is_empty() {
+            tr!(
+                "No translation provider selected: comments are not sent anywhere until you set provider.".to_owned(),
+                "Провайдера перекладу не вибрано: коментарі нікуди не надсилаються, доки не задано provider.".to_owned()
             )
-            .await;
+        } else {
+            tr!(
+                format!("Translation order: {}", chain.join(" → ")),
+                format!("Порядок перекладу: {}", chain.join(" → "))
+            )
+        };
+        self.client.log_message(MessageType::INFO, message).await;
         // Сам ключ ніколи не потрапляє в журнал: лише план або причина, чому DeepL пропускається.
         match config.deepl_key() {
             Some(Ok(key)) => {
@@ -151,6 +154,16 @@ impl LanguageServer for Backend {
             (*version, comment, markdown)
         };
         let translator = self.translator.read().await.clone();
+        if !translator.configured() {
+            // Без вибраного сервісу текст коментаря нікуди не йде: лише пояснюємо, як його вибрати.
+            return Ok(Some(Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: setup_hint(),
+                }),
+                range: Some(comment.range),
+            }));
+        }
         let (kind, value) = match translator.translate(&comment.text).await {
             Ok(text) => {
                 let code = &translator.target().code;
@@ -193,6 +206,35 @@ impl LanguageServer for Backend {
             range: Some(comment.range),
         }))
     }
+}
+
+/// Підказка замість перекладу, доки користувач не вибрав сервіс перекладу.
+fn setup_hint() -> String {
+    let example = "```json\n\"lsp\": {\n  \"comment-translate\": {\n    \"initialization_options\": { \"provider\": \"google\" }\n  }\n}\n```";
+    tr!(
+        format!(
+            "**Comment Translation: choose a translation provider**\n\n\
+             Comments are not sent anywhere until you choose a provider in your Zed settings, \
+             for example:\n\n{example}\n\n\
+             - `google` — Google Translate, no key\n\
+             - `mymemory` — MyMemory, no key, daily limit\n\
+             - `deepl` — DeepL with your own API key (`deepl_key_file` or `DEEPL_AUTH_KEY`)\n\n\
+             The chosen service then receives the comment text. Google and DeepL fall back to \
+             other services by default; `\"fallback\": \"none\"` keeps only the chosen one. \
+             After changing the settings, run `editor: restart language server`."
+        ),
+        format!(
+            "**Comment Translation: виберіть сервіс перекладу**\n\n\
+             Коментарі нікуди не надсилаються, доки ви не виберете провайдера в налаштуваннях \
+             Zed, наприклад:\n\n{example}\n\n\
+             - `google` — Google Translate, без ключа\n\
+             - `mymemory` — MyMemory, без ключа, денний ліміт\n\
+             - `deepl` — DeepL з власним ключем API (`deepl_key_file` або `DEEPL_AUTH_KEY`)\n\n\
+             Після цього текст коментаря отримуватиме вибраний сервіс. Google і DeepL за \
+             замовчуванням переходять на інші сервіси; `\"fallback\": \"none\"` залишає лише \
+             вибраний. Після зміни налаштувань виконайте `editor: restart language server`."
+        )
+    )
 }
 
 struct ExitAware<S> {
