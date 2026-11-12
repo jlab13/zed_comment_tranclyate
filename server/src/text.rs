@@ -1,3 +1,5 @@
+use crate::languages::LanguageSpec;
+
 // LSP використовує UTF-16, а Tree-sitter — байтові зміщення UTF-8.
 pub fn byte_offset(source: &str, line_number: u32, character: u32) -> Option<usize> {
     let mut start = 0;
@@ -31,14 +33,25 @@ pub fn position(source: &str, offset: usize) -> (u32, u32) {
     (line, column)
 }
 
-pub fn clean(raw: &str) -> String {
-    if let Some(text) = raw.strip_prefix("//") {
-        let text = text.trim_start_matches(['/', '!']);
-        // Прибираємо один пробіл після маркера, зберігаючи відступи вкладених списків.
-        return text.strip_prefix(' ').unwrap_or(text).trim_end().to_owned();
+/// Прибирає маркери коментаря відповідної мови та спільний відступ.
+pub fn clean(raw: &str, language: &LanguageSpec) -> String {
+    if let Some(text) = language
+        .line_markers
+        .iter()
+        .find_map(|marker| strip_line_marker(raw, marker))
+    {
+        return text.to_owned();
     }
-    let text = raw.strip_prefix("/*").unwrap_or(raw);
-    let text = text.strip_suffix("*/").unwrap_or(text);
+    let text = match language.block {
+        Some((open, close)) if raw.starts_with(open) => {
+            let text = &raw[open.len()..];
+            let text = text.strip_suffix(close).unwrap_or(text);
+            // `/*!` — внутрішній документаційний коментар Rust або Doxygen у стилі Qt.
+            // Вкладені блоки Rust, Swift і Dart зберігають внутрішні маркери як частину тексту.
+            text.strip_prefix('!').unwrap_or(text)
+        }
+        _ => raw,
+    };
     let lines: Vec<_> = text
         .lines()
         .enumerate()
@@ -75,6 +88,75 @@ pub fn clean(raw: &str) -> String {
         .to_owned()
 }
 
+fn strip_line_marker<'a>(raw: &'a str, marker: &str) -> Option<&'a str> {
+    let text = raw.strip_prefix(marker)?;
+    // Повтори маркера (`///`, `##`) і `!` у `//!` теж належать до маркера.
+    let text =
+        text.trim_start_matches(|ch: char| marker.contains(ch) || (ch == '!' && marker == "//"));
+    // Прибираємо один пробіл після маркера, зберігаючи відступи вкладених списків.
+    Some(text.strip_prefix(' ').unwrap_or(text).trim_end())
+}
+
+/// Повертає вміст рядкового літерала Python без префікса (`r`, `u`) і лапок.
+pub fn unquote(raw: &str) -> &str {
+    let body = raw.trim_start_matches(|ch: char| ch.is_ascii_alphabetic());
+    for quotes in ["\"\"\"", "'''", "\"", "'"] {
+        if let Some(inner) = body.strip_prefix(quotes) {
+            return inner.strip_suffix(quotes).unwrap_or(inner);
+        }
+    }
+    body
+}
+
+/// Вирівнює docstring так само, як `inspect.cleandoc` у Python.
+pub fn cleandoc(text: &str) -> String {
+    let lines: Vec<_> = text.lines().map(expand_tabs).collect();
+    let spaces = |line: &str| line.len() - line.trim_start_matches(' ').len();
+    // Відступ першого рядка не враховується: він іде одразу після лапок.
+    let margin = lines
+        .iter()
+        .skip(1)
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| spaces(line))
+        .min()
+        .unwrap_or(0);
+    let lines: Vec<_> = lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            if line.trim().is_empty() {
+                ""
+            } else if index == 0 {
+                line.trim()
+            } else {
+                line[margin..].trim_end()
+            }
+        })
+        .collect();
+    let first = lines.iter().position(|line| !line.is_empty());
+    let last = lines.iter().rposition(|line| !line.is_empty());
+    match (first, last) {
+        (Some(first), Some(last)) => lines[first..=last].join("\n"),
+        _ => String::new(),
+    }
+}
+
+fn expand_tabs(line: &str) -> String {
+    let mut result = String::with_capacity(line.len());
+    let mut column = 0;
+    for ch in line.chars() {
+        if ch == '\t' {
+            let width = 8 - column % 8;
+            result.extend(std::iter::repeat_n(' ', width));
+            column += width;
+        } else {
+            result.push(ch);
+            column += 1;
+        }
+    }
+    result
+}
+
 fn indentation(line: &str) -> usize {
     line.len() - line.trim_start_matches([' ', '\t']).len()
 }
@@ -94,21 +176,54 @@ fn structured_line(line: &str) -> bool {
             .is_some_and(after_marker)
 }
 
-// З’єднуємо перенесений текст, але зберігаємо абзаци, пункти списків і Doxygen-теги.
+// Заголовок Markdown: від одного до шести `#`, після яких іде пробіл або кінець рядка.
+fn heading(line: &str) -> bool {
+    let hashes = line.bytes().take_while(|&byte| byte == b'#').count();
+    (1..=6).contains(&hashes)
+        && line[hashes..]
+            .chars()
+            .next()
+            .is_none_or(char::is_whitespace)
+}
+
+// Огородження блоку коду Markdown (```` ``` ```` або `~~~`).
+fn code_fence(line: &str) -> Option<&'static str> {
+    ["```", "~~~"]
+        .into_iter()
+        .find(|marker| line.starts_with(marker))
+}
+
+// З’єднуємо перенесений текст, але зберігаємо абзаци, пункти списків, Doxygen-теги,
+// заголовки Markdown і блоки коду.
 pub fn paragraphs(text: &str) -> String {
     let mut result = String::new();
     let mut paragraph_break = false;
+    // Після заголовка чи блоку коду наступний рядок не приєднується до попереднього.
+    let mut line_break = false;
+    let mut fence = None;
     for line in text.lines() {
         let trimmed = line.trim();
+        if let Some(marker) = fence {
+            // Код усередині огородження залишаємо дослівно, разом із порожніми рядками.
+            result.push('\n');
+            result.push_str(line.trim_end());
+            if trimmed.starts_with(marker) {
+                fence = None;
+                line_break = true;
+            }
+            continue;
+        }
         if trimmed.is_empty() {
             paragraph_break = !result.is_empty();
             continue;
         }
-        let structured = structured_line(trimmed);
+        fence = code_fence(trimmed);
+        let standalone = fence.is_some() || heading(trimmed);
+        let structured = standalone || structured_line(trimmed);
         if !result.is_empty() {
             result.push_str(if paragraph_break {
                 "\n\n"
-            } else if structured {
+            } else if structured || line_break {
                 "\n"
             } else {
                 " "
@@ -116,13 +231,22 @@ pub fn paragraphs(text: &str) -> String {
         }
         result.push_str(if structured { line.trim_end() } else { trimmed });
         paragraph_break = false;
+        line_break = standalone;
     }
+    // Незакритий блок коду може закінчуватися порожніми рядками.
+    result.truncate(result.trim_end().len());
     result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::languages::{BASH, C, PYTHON, RUST, SWIFT};
+
+    /// Наявні тести перевіряють C, тому очищення за замовчуванням використовує правила C.
+    fn clean(raw: &str) -> String {
+        super::clean(raw, &C)
+    }
 
     #[test]
     fn utf16_surrogate_pair_is_not_split() {
@@ -230,5 +354,105 @@ mod tests {
         ];
         let cleaned = lines.into_iter().map(clean).collect::<Vec<_>>().join("\n");
         assert_eq!(paragraphs(&cleaned), paragraphs(&clean(block)));
+    }
+
+    #[test]
+    fn strips_rust_and_doxygen_documentation_markers() {
+        for raw in [
+            "/// Outer",
+            "//! Inner",
+            "/** Outer */",
+            "/*! Inner */",
+            "/*!\n * Inner\n */",
+        ] {
+            let expected = if raw.contains("Outer") {
+                "Outer"
+            } else {
+                "Inner"
+            };
+            assert_eq!(super::clean(raw, &RUST), expected, "{raw}");
+        }
+        assert_eq!(super::clean("/*! Qt style */", &C), "Qt style");
+    }
+
+    #[test]
+    fn nested_block_comments_keep_inner_markers_as_text() {
+        let raw = "/* outer /* inner */ tail */";
+        assert_eq!(super::clean(raw, &RUST), "outer /* inner */ tail");
+        assert_eq!(super::clean(raw, &SWIFT), "outer /* inner */ tail");
+    }
+
+    #[test]
+    fn strips_hash_markers_for_python_and_bash() {
+        for language in [&PYTHON, &BASH] {
+            assert_eq!(super::clean("# Return value", language), "Return value");
+            assert_eq!(super::clean("## Section", language), "Section");
+            assert_eq!(super::clean("#   - nested", language), "  - nested");
+            assert_eq!(super::clean("#", language), "");
+            assert_eq!(super::clean("##########", language), "");
+        }
+    }
+
+    #[test]
+    fn unquote_strips_python_prefixes_and_quotes() {
+        assert_eq!(unquote(r#""""Doc.""""#), "Doc.");
+        assert_eq!(unquote("r'''Doc.'''"), "Doc.");
+        assert_eq!(unquote("U\"Doc.\""), "Doc.");
+        assert_eq!(unquote("'Doc.'"), "Doc.");
+        assert_eq!(unquote("\"\""), "");
+        assert_eq!(unquote("\"\"\"\"\"\""), "");
+        assert_eq!(unquote("\"\"\"unterminated"), "unterminated");
+    }
+
+    #[test]
+    fn cleandoc_matches_python_inspect() {
+        // Очікування отримано з inspect.cleandoc у Python 3.
+        assert_eq!(
+            cleandoc("\n    Summary.\n\n        Indented.\n    End.\n    "),
+            "Summary.\n\n    Indented.\nEnd."
+        );
+        assert_eq!(
+            cleandoc("First line.\n        Second.\n          Third."),
+            "First line.\nSecond.\n  Third."
+        );
+        assert_eq!(
+            cleandoc("\tTab\n\tindented\n\t\tmore"),
+            "Tab\nindented\n        more"
+        );
+        assert_eq!(cleandoc("Один рядок 😀"), "Один рядок 😀");
+        // На відміну від Python, рядки з самих пробілів вважаються порожніми: hover не потрібен.
+        assert_eq!(cleandoc("  \n  \n"), "");
+    }
+
+    #[test]
+    fn fenced_code_blocks_are_kept_verbatim() {
+        let text = "Example:\n\n```rust\nlet x = 1;\n\n    nested();\n```\nAfter the\ncode.";
+        assert_eq!(
+            paragraphs(text),
+            "Example:\n\n```rust\nlet x = 1;\n\n    nested();\n```\nAfter the code."
+        );
+        assert_eq!(
+            paragraphs("Text\n~~~\n- not a list\n~~~"),
+            "Text\n~~~\n- not a list\n~~~"
+        );
+        assert_eq!(
+            paragraphs("Open\n```\ncode\n\n"),
+            "Open\n```\ncode",
+            "незакритий блок не залишає порожніх рядків у кінці"
+        );
+    }
+
+    #[test]
+    fn markdown_headings_stay_on_separate_lines() {
+        let text = "# Examples\nCall the\nfunction.\n## Panics\nNever\n#hashtag inline.\n#";
+        assert_eq!(
+            paragraphs(text),
+            "# Examples\nCall the function.\n## Panics\nNever #hashtag inline.\n#"
+        );
+        assert_eq!(
+            paragraphs("Text\n####### seven"),
+            "Text ####### seven",
+            "більше шести # — не заголовок"
+        );
     }
 }

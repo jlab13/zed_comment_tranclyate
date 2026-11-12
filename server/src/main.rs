@@ -1,11 +1,13 @@
 mod comments;
 mod google;
+mod languages;
 mod locale;
 #[cfg(all(target_os = "macos", feature = "apple"))]
 mod native;
 mod text;
 mod translate;
 
+use languages::LanguageSpec;
 use locale::TargetLanguage;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{Notify, RwLock};
@@ -15,7 +17,8 @@ use translate::{Config, Translator};
 
 struct Backend {
     client: Client,
-    documents: RwLock<HashMap<Url, (i32, String)>>,
+    /// Версія, текст і мова кожного відкритого документа підтримуваної мови.
+    documents: RwLock<HashMap<Url, (i32, String, &'static LanguageSpec)>>,
     translator: RwLock<Arc<Translator>>,
 }
 
@@ -58,17 +61,21 @@ impl LanguageServer for Backend {
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let doc = params.text_document;
-        if doc.language_id == "c" {
-            self.documents
-                .write()
-                .await
-                .insert(doc.uri, (doc.version, doc.text));
+        let mut documents = self.documents.write().await;
+        // Документи непідтримуваних мов не зберігаємо, тому hover для них не з’являється.
+        match languages::resolve(&doc.language_id, &doc.uri) {
+            Some(language) => {
+                documents.insert(doc.uri, (doc.version, doc.text, language));
+            }
+            None => {
+                documents.remove(&doc.uri);
+            }
         }
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let mut documents = self.documents.write().await;
-        if let Some((version, text)) = documents.get_mut(&params.text_document.uri) {
+        if let Some((version, text, _)) = documents.get_mut(&params.text_document.uri) {
             if params.text_document.version <= *version {
                 return;
             }
@@ -93,10 +100,10 @@ impl LanguageServer for Backend {
         let target = params.text_document_position_params;
         let (version, comment) = {
             let documents = self.documents.read().await;
-            let Some((version, source)) = documents.get(&target.text_document.uri) else {
+            let Some((version, source, language)) = documents.get(&target.text_document.uri) else {
                 return Ok(None);
             };
-            let Some(comment) = comments::at(source, target.position) else {
+            let Some(comment) = comments::at(source, target.position, language) else {
                 return Ok(None);
             };
             (*version, comment)

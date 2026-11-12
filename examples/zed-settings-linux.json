@@ -1,19 +1,4 @@
 {
-  "file_types": {
-    "C": [
-      "c",
-      "h"
-    ]
-  },
-  "languages": {
-    "C": {
-      "language_servers": [
-        "clangd",
-        "comment-translate",
-        "..."
-      ]
-    }
-  },
   "lsp": {
     "comment-translate": {
       "binary": {

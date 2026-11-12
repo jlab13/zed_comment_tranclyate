@@ -120,10 +120,89 @@ def main():
         assert "Повернути значення заголовка." in header["contents"]["value"], header
         send("textDocument/didClose", {"textDocument": {"uri": uri}})
         assert hover(2) is None
+
+        def open_document(path, language_id, text):
+            nonlocal uri
+            uri = f"file:///tmp/{path}"
+            send("textDocument/didOpen", {"textDocument": {
+                "uri": uri, "languageId": language_id, "version": 1, "text": text,
+            }})
+
+        def value(result):
+            assert result is not None, "Очікувався hover"
+            return result["contents"]["value"]
+
+        # Zed типово відкриває .h у режимі C++.
+        open_document("comment-translate-smoke-cpp.h", "cpp", "/// Повернути значення C++.\nint value();\n")
+        assert "Повернути значення C++." in value(hover(0, 5))
+        send("textDocument/didClose", {"textDocument": {"uri": uri}})
+
+        rust_doc = "/// Поточне значення не змінюється."
+        open_document("comment-translate-smoke.rs", "rust", (
+            "//! Модуль лічильника.\n"
+            "\n"
+            "/// Повертає наступне значення.\n"
+            f"{rust_doc}\n"
+            "fn next(value: u32) -> u32 {\n"
+            '    let marker = r#"// не коментар"#;\n'
+            "    value + 1 // Додати одиницю.\n"
+            "}\n"
+        ))
+        assert "Модуль лічильника." in value(hover(0, 5))
+        documentation = hover(2, 5)
+        assert "Повертає наступне значення. Поточне значення не змінюється." in value(documentation)
+        assert documentation == hover(3, 5)
+        assert documentation["range"] == {
+            "start": {"line": 2, "character": 0},
+            "end": {"line": 3, "character": len(rust_doc)},
+        }, "Діапазон doc-коментаря Rust має закінчуватися до переносу рядка"
+        assert hover(3, len(rust_doc)) is None
+        assert hover(5, 22) is None, "Сирі рядки Rust не повинні перекладатися"
+        assert "Додати одиницю." in value(hover(6, 20))
+        send("textDocument/didClose", {"textDocument": {"uri": uri}})
+
+        open_document("comment-translate-smoke.py", "python", (
+            "#!/usr/bin/env python3\n"
+            '"""Модуль прикладу."""\n'
+            "# Перший рядок.\n"
+            "# Другий рядок.\n"
+            'marker = "# не коментар"\n'
+            "\n"
+            "\n"
+            "def value():\n"
+            '    """\n'
+            "    Повертає значення.\n"
+            "\n"
+            "    Другий абзац.\n"
+            '    """\n'
+            '    """Не docstring."""\n'
+            "    return 1\n"
+        ))
+        assert hover(0, 3) is None, "Shebang не повинен перекладатися"
+        assert "Модуль прикладу." in value(hover(1, 5))
+        assert "Перший рядок. Другий рядок." in value(hover(3, 3))
+        assert hover(4, 12) is None, "Рядки Python не повинні перекладатися"
+        docstring = hover(9, 6)
+        assert "Повертає значення.\n\nДругий абзац." in value(docstring), docstring
+        assert docstring["range"] == {"start": {"line": 8, "character": 4}, "end": {"line": 12, "character": 7}}
+        assert hover(13, 8) is None, "Лише перший рядковий літерал функції є docstring"
+        send("textDocument/didClose", {"textDocument": {"uri": uri}})
+
+        open_document("comment-translate-smoke.sh", "shellscript", '#!/bin/sh\n# Зібрати проєкт.\necho "$#"\n')
+        assert hover(0, 3) is None
+        assert "Зібрати проєкт." in value(hover(1, 3))
+        assert hover(2, 7) is None
+        send("textDocument/didClose", {"textDocument": {"uri": uri}})
+
+        open_document("comment-translate-smoke.md", "markdown", "# Заголовок\n<!-- коментар -->\n")
+        assert hover(0, 3) is None, "Непідтримувані мови ігноруються"
+        send("textDocument/didClose", {"textDocument": {"uri": uri}})
+
         send("shutdown", request=True)
         send("exit")
         assert process.wait(timeout=5) == 0
-        print(f"LSP smoke test ({provider}): OK — C і .h, hover, кеш, зміни, закриття, вбудований Swift та ліміти")
+        print(f"LSP smoke test ({provider}): OK — C, .h (C і C++), Rust, Python, Shell Script, "
+              "hover, кеш, зміни, закриття, вбудований Swift та ліміти")
     finally:
         if process.poll() is None:
             process.kill()
